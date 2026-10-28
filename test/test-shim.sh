@@ -159,9 +159,7 @@ check "markdown link keeps closing paren" '[[ $out == *"(https://t.antithesis.co
 check "stderr ?auth=X&foo=1 becomes ?foo=1" '[[ $err == *"r?foo=1"* && $err != *SECRET* ]]'
 check "stdout has no stderr text" '[[ $out != *"err:"* && $out != *"::group::"* ]]'
 check "stderr has no stdout text" '[[ $err != *"ARGS:"* ]]'
-check "group header first on stderr" '[[ $(head -n 1 "$tmp/err") == "::group::snouty runs list" ]]'
-check "endgroup last on stderr" '[[ $(tail -n 1 "$tmp/err") == "::endgroup::" ]]'
-check "exit code line on stderr" '[[ $err == *"snouty exit 0 ("*" ms)"* ]]'
+check "no Actions log commands on stderr (they would land in the agent's tool output)" '[[ $err != *"::group::"* && $err != *"::endgroup::"* ]]'
 
 FAKE_EXIT=3 run runs show R1
 check "exit code 3 preserved" '[ "$rc" -eq 3 ]'
@@ -202,8 +200,6 @@ check "argv logged exactly (newline, dash, empty, quote)" \
   '[[ $(head -n 1 "$ATT_COMMANDS_LOG" | jq -c .argv) == "[\"runs\",\"search\",\"R1\",\"multi\\nline\",\"-dash\",\"\",\"it'\''s\"]" ]]'
 check "denied call logged with exit 126" \
   '[[ $(tail -n 1 "$ATT_COMMANDS_LOG" | jq -c "[.argv, .exit, .denied]") == "[[\"launch\",\"--duration\",\"30\"],126,true]" ]]'
-run runs search R1 $'multi\nline'
-check "group header stays on one line" '[ "$(grep -c "^::group::" "$tmp/err")" -eq 1 ] && [[ $(head -n 1 "$tmp/err") == *"\$'"'"'multi\\nline'"'"'"* ]]'
 
 # --- Locating the real binary. -------------------------------------------------------------
 ATT_SNOUTY_REAL=/bin/false run runs list

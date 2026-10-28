@@ -1,0 +1,6 @@
+{"ts":"2026-10-28T03:01:02Z","argv":["--json","runs","list","--since","7d"],"exit":0,"duration_ms":812,"denied":false}
+{"ts":"2026-10-28T03:01:10Z","argv":["runs","show","r-0c3f"],"exit":0,"duration_ms":420,"denied":false}
+{"ts":"2026-10-28T03:02:31Z","argv":["runs","search","r-0c3f","filter(ev => ev.antithesis_assert?.id == \"Balance stays nonnegative\")"],"exit":0,"duration_ms":2310,"denied":false}
+{"ts":"2026-10-28T03:03:00Z","argv":["launch","--duration","30"],"exit":126,"duration_ms":3,"denied":true}
+{"ts":"2026-10-28T03:03:40Z","argv":["runs","logs","r-0c3f","--grep","it's\nmultiline"],"exit":1,"duration_ms":15001,"denied":false}
+{"ts":"2026-10-28T03:04:

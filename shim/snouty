@@ -2,7 +2,8 @@
 # snouty shim for antithesis-triage-action (see plans/contract.md, "Shim
 # contract"). Sits ahead of the real binary on PATH and:
 #   - allows only read-only commands; everything else exits 126,
-#   - appends one JSON line per call to $ATT_COMMANDS_LOG,
+#   - appends one JSON line per call to $ATT_COMMANDS_LOG (run-agent.sh shows
+#     progress in the Actions log; stderr here goes to the agent),
 #   - strips signed ?auth= query strings from stdout and stderr, streaming.
 # It is a guardrail, not a security boundary: the API key is in the
 # environment.
@@ -37,7 +38,6 @@ log_call() { # exit_code duration_ms denied
 
 finish() { # exit_code denied
   local ms=$(( $(date +%s%3N) - start_ms ))
-  printf 'snouty exit %s (%s ms)\n::endgroup::\n' "$1" "$ms" >&2
   log_call "$1" "$ms" "$2"
   exit "$1"
 }
@@ -65,8 +65,6 @@ strip_auth() {
     -e 's/\?auth=[^]["'\''<>&#)`\\[:space:]]+&/?/g' \
     -e 's/[?&]auth=[^]["'\''<>&#)`\\[:space:]]+//g'
 }
-
-printf '::group::%s\n' "$display" >&2
 
 # --- Parse the command path, skipping snouty's global flags. -----------------
 # Globals (clap `global = true`) may appear before or after any subcommand:
