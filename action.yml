@@ -111,6 +111,7 @@ runs:
       shell: bash
       env:
         ATT_ACTION_PATH: ${{ github.action_path }}
+        ATT_ACTION_REF: ${{ github.action_ref }}
         ATT_HOME: ${{ runner.temp }}/antithesis-triage
         ATT_OUT: ${{ runner.temp }}/antithesis-triage/out
         ATT_CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
