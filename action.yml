@@ -1,0 +1,167 @@
+name: Antithesis Triage
+description: Triage Antithesis test runs with a headless Claude Code agent and publish a report plus the session transcript.
+author: Antithesis
+
+branding:
+  icon: search
+  color: purple
+
+inputs:
+  runs:
+    description: Natural-language description of which runs to triage.
+    required: false
+    default: Completed and incomplete runs from the last 7 days for this repository.
+  since:
+    description: Optional hint, e.g. "7d". Only consider runs created in this window.
+    required: false
+    default: ''
+  limit:
+    description: Optional hint. Only triage the last N matching runs.
+    required: false
+    default: ''
+  run-ids:
+    description: Optional explicit run IDs (newline or comma separated). Overrides the other selection inputs.
+    required: false
+    default: ''
+  run-params:
+    description: Optional key=value lines matched against run parameters, e.g. "antithesis.source=main".
+    required: false
+    default: ''
+  grouping:
+    description: Natural-language guidance on which runs are comparable. If empty, the agent infers a grouping and reports it.
+    required: false
+    default: ''
+  known-issues:
+    description: One entry per line, a property name or failure description plus an optional note/link. Light check only; flagged if it diverges or stops occurring.
+    required: false
+    default: ''
+  ignore:
+    description: One entry per line, properties or failures to skip entirely. Only counted in the report.
+    required: false
+    default: ''
+  instructions:
+    description: Free-form extra guidance for the agent.
+    required: false
+    default: ''
+  model:
+    description: Claude model for the agent session.
+    required: false
+    default: claude-opus-5-5
+  max-turns:
+    description: Maximum agent turns.
+    required: false
+    default: '200'
+  max-budget-usd:
+    description: Maximum spend on model API calls for the session.
+    required: false
+    default: '10'
+  timeout-minutes:
+    description: Wall-clock limit for the agent session.
+    required: false
+    default: '60'
+  upload-transcript:
+    description: '"auto" (off on public repos, on for private), "true", or "false".'
+    required: false
+    default: auto
+  retention-days:
+    description: Artifact retention in days.
+    required: false
+    default: '14'
+  github-token:
+    description: Token used only to read repository visibility (for upload-transcript auto). Needs no write scopes.
+    required: false
+    default: ${{ github.token }}
+  claude-code-version:
+    description: Claude Code CLI version to install.
+    required: false
+    default: 2.1.312
+  snouty-version:
+    description: snouty release to install (>= 0.8.0).
+    required: false
+    default: 0.8.0
+  skills-ref:
+    description: antithesishq/antithesis-skills commit to load the triage skill from.
+    required: false
+    default: ca4b8fba0991dbaf4b1b57bea9a4b9605725025f
+
+outputs:
+  status:
+    description: Final findings status (complete, partial, failed).
+    value: ${{ steps.finalize.outputs.status }}
+  report-path:
+    description: Path to report.md on the runner.
+    value: ${{ steps.finalize.outputs.report-path }}
+  findings-path:
+    description: Path to findings.json on the runner.
+    value: ${{ steps.finalize.outputs.findings-path }}
+  artifact-url:
+    description: URL of the uploaded artifact.
+    value: ${{ steps.upload.outputs.artifact-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check triggering event
+      shell: bash
+      env:
+        ATT_ACTION_PATH: ${{ github.action_path }}
+      run: '"$ATT_ACTION_PATH/scripts/check-event.sh"'
+
+    - name: Install snouty, Claude Code and the triage skill
+      shell: bash
+      env:
+        ATT_ACTION_PATH: ${{ github.action_path }}
+        ATT_HOME: ${{ runner.temp }}/antithesis-triage
+        ATT_OUT: ${{ runner.temp }}/antithesis-triage/out
+        ATT_CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
+        ATT_SNOUTY_VERSION: ${{ inputs.snouty-version }}
+        ATT_SKILLS_REF: ${{ inputs.skills-ref }}
+      run: '"$ATT_ACTION_PATH/scripts/install.sh"'
+
+    - name: Preflight
+      shell: bash
+      run: '"$ATT_ACTION_PATH/scripts/preflight.sh"'
+
+    - name: Render prompt
+      shell: bash
+      env:
+        ATT_IN_RUNS: ${{ inputs.runs }}
+        ATT_IN_SINCE: ${{ inputs.since }}
+        ATT_IN_LIMIT: ${{ inputs.limit }}
+        ATT_IN_RUN_IDS: ${{ inputs.run-ids }}
+        ATT_IN_RUN_PARAMS: ${{ inputs.run-params }}
+        ATT_IN_GROUPING: ${{ inputs.grouping }}
+        ATT_IN_KNOWN_ISSUES: ${{ inputs.known-issues }}
+        ATT_IN_IGNORE: ${{ inputs.ignore }}
+        ATT_IN_INSTRUCTIONS: ${{ inputs.instructions }}
+      run: '"$ATT_ACTION_PATH/scripts/render-prompt.sh"'
+
+    - name: Run triage agent
+      id: agent
+      shell: bash
+      env:
+        ATT_MODEL: ${{ inputs.model }}
+        ATT_MAX_TURNS: ${{ inputs.max-turns }}
+        ATT_MAX_BUDGET_USD: ${{ inputs.max-budget-usd }}
+        ATT_TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+      run: '"$ATT_ACTION_PATH/scripts/run-agent.sh"'
+
+    - name: Finalize report
+      id: finalize
+      if: always()
+      shell: bash
+      env:
+        ATT_UPLOAD_TRANSCRIPT: ${{ inputs.upload-transcript }}
+        ATT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        ATT_AGENT_OUTCOME: ${{ steps.agent.outcome }}
+      run: '"$ATT_ACTION_PATH/scripts/finalize.sh"'
+
+    - name: Upload artifact
+      id: upload
+      if: always() && env.ATT_OUT != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: antithesis-triage-${{ github.run_number }}-${{ github.run_attempt }}
+        path: ${{ env.ATT_OUT }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: warn
