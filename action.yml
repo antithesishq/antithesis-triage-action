@@ -164,6 +164,7 @@ runs:
         ATT_GITHUB_TOKEN: ${{ inputs.github-token }}
         ATT_AGENT_OUTCOME: ${{ steps.agent.outcome }}
         ATT_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        ATT_EVENT_NAME: ${{ github.event_name }}
       run: '"$ATT_ACTION_PATH/scripts/finalize.sh"'
 
     # Only upload once finalize has redacted everything in the output dir.

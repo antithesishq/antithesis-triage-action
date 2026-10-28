@@ -102,6 +102,12 @@ redact_file() { # <file> <path relative to its target>
   fi
   src=$f
   if grep -q 'PRIVATE KEY-----' "$f"; then
+    # The PEM pass reads the whole file into memory; quarantine huge files
+    # rather than risk running finalize out of memory.
+    if [[ $(stat -c %s "$f") -gt $((64 * 1024 * 1024)) ]]; then
+      quarantine_file "$f" "$rel" "contains a private key marker and is too large to redact"
+      return
+    fi
     if ! jq -R -s -j "$pem_program" "$f" >"$scratch/pem"; then
       quarantine_file "$f" "$rel" "redaction failed"
       return
