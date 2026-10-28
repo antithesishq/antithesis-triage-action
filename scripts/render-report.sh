@@ -6,10 +6,13 @@
 #          [--inputs inputs.json] [--agent-result agent-result.json]
 #          [--artifact-dir DIR] [--session-id ID]
 #          [--transcripts included|withheld] [--transcripts-reason TEXT]
+#          [--quarantined quarantined.tsv]
 #
-# Reads GITHUB_SERVER_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_NUMBER
-# and GITHUB_RUN_ATTEMPT for links (optional), and ATT_REPORT_DATE (YYYY-MM-DD,
-# defaults to today, UTC) for debugging-session titles.
+# Environment (all optional): GITHUB_SERVER_URL, GITHUB_REPOSITORY and
+# GITHUB_RUN_ID for links; ATT_ARTIFACT_NAME to name the artifact;
+# ANTITHESIS_TENANT, the only host triage-report links may point to
+# (https://<tenant>.antithesis.com/); ATT_REPORT_DATE (YYYY-MM-DD, default
+# today, UTC) for debugging-session titles.
 #
 # Findings text is model output derived from untrusted logs, so it is
 # neutralized before it reaches markdown: "<tag" and "![image" get a
@@ -20,12 +23,13 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --findings F --out F [--commands-log F] [--versions F] [--inputs F] [--agent-result F] [--artifact-dir D] [--session-id ID] [--transcripts included|withheld] [--transcripts-reason TEXT]" >&2
+  echo "usage: $0 --findings F --out F [--commands-log F] [--versions F] [--inputs F] [--agent-result F] [--artifact-dir D] [--session-id ID] [--transcripts included|withheld] [--transcripts-reason TEXT] [--quarantined F]" >&2
   exit 2
 }
 
 findings='' out='' commands_log='' versions='' inputs='' agent_result=''
 artifact_dir='' session_id='' transcripts='withheld' transcripts_reason=''
+quarantined=''
 while [[ $# -gt 0 ]]; do
   [[ $# -ge 2 ]] || usage
   case $1 in
@@ -39,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --session-id) session_id=$2 ;;
     --transcripts) transcripts=$2 ;;
     --transcripts-reason) transcripts_reason=$2 ;;
+    --quarantined) quarantined=$2 ;;
     *) usage ;;
   esac
   shift 2
@@ -76,10 +81,10 @@ if [[ -n $artifact_dir ]]; then
     done | jq -R . | jq -cs . >"$work/patches.json"
 fi
 
-cmdlog=/dev/null
-if [[ -n $commands_log && -f $commands_log ]]; then
-  cmdlog=$commands_log
-fi
+# Optional text inputs: missing files read as empty.
+text_or_empty() { if [[ -n $1 && -f $1 ]]; then printf '%s' "$1"; else printf '/dev/null'; fi; }
+cmdlog=$(text_or_empty "$commands_log")
+quarantined=$(text_or_empty "$quarantined")
 
 repo_url=''
 if [[ -n ${GITHUB_SERVER_URL:-} && -n ${GITHUB_REPOSITORY:-} ]]; then
@@ -89,12 +94,12 @@ run_url=''
 if [[ -n $repo_url && -n ${GITHUB_RUN_ID:-} ]]; then
   run_url="$repo_url/actions/runs/$GITHUB_RUN_ID"
 fi
-artifact_name=''
-if [[ -n ${GITHUB_RUN_NUMBER:-} ]]; then
-  artifact_name="antithesis-triage-$GITHUB_RUN_NUMBER-${GITHUB_RUN_ATTEMPT:-1}"
+tenant=''
+if [[ ${ANTITHESIS_TENANT:-} =~ ^[A-Za-z0-9-]+$ ]]; then
+  tenant=${ANTITHESIS_TENANT,,}
 fi
 
-# shellcheck disable=SC2016  # jq program, not shell
+# shellcheck disable=SC2016,SC1003  # jq program, not shell
 program='
   def zwj: "\u200d";
 
@@ -161,9 +166,17 @@ program='
   def safe_path:
     type == "string" and length > 0 and (startswith("/") | not)
     and (test("[[:cntrl:]]") | not) and (split("/") | index("..") | not);
-  def safe_url:
-    type == "string" and test("^https?://[^\\s<>\"'\''`()\\[\\]]+$");
   def strip_auth: sub("[?&]auth=[^&#]*"; "");
+  # Triage-report links only to https://<tenant>.antithesis.com/; anything
+  # else (or no tenant configured) is shown as unclickable text.
+  def report_link:
+    if type != "string" or . == "" then "-"
+    else strip_auth as $u
+      | if $tenant != ""
+           and ($u | test("^https://" + $tenant + "\\.antithesis\\.com/[^\\s<>\"'\''`()\\[\\]]*$"; "i"))
+        then "[triage report](\($u))"
+        else $u | code end
+    end;
   def commit_md:
     if is_sha and $repo_url != "" then "[\(.[0:7] | code)](\($repo_url)/commit/\(.))"
     elif . == null or . == "" then "-"
@@ -187,6 +200,8 @@ program='
     tostring as $k
     | {new: "New", ongoing: "Ongoing", known_issue: "Known issue", unclear: "Unclear"}[$k] // ($k | text);
   def snouty_line: map(shq) | join(" ") | "snouty " + .;
+  def diverged: (.known_issue | type) == "object" and .known_issue.status == "diverged";
+  def in_run($id): (.failing_runs // []) | index([$id]);
 
   # The debugging-session title argument: double quotes when nothing in it
   # is special to the shell, single quotes otherwise.
@@ -199,7 +214,9 @@ program='
     . as $x
     | ($x.failing_runs // []) as $failing
     | ([$failing[] | $runs_by_id[.].commit // empty | select(is_sha)] | first) as $run_commit
-    | [ "### \($n). \($x.classification | class_label): \($x.property | text)",
+    | (if $x.classification == "known_issue" and ($x | diverged) then "Known issue, diverged"
+       else $x.classification | class_label end) as $label
+    | [ "### \($n). \($label): \($x.property | text)",
         "",
         "- **Classification:** \($x.classification | tostring | gsub("_"; " ") | text)"
           + (if ($x.baseline_runs // []) | length > 0
@@ -268,12 +285,18 @@ program='
       ] | join("\n");
 
   ($f.failures // []) as $failures
-  | [$failures[] | select(.classification != "known_issue")] as $main
-  | ($main | map(select(.classification == "new")) + map(select(.classification == "ongoing"))
-     + map(select(.classification != "new" and .classification != "ongoing"))) as $main_sorted
-  | [$failures[] | select(.classification == "known_issue")] as $known
-  | ($failures | map(select(.known_issue.status == "diverged")) | length) as $diverged
+  # Needing attention: new failures, then known issues that diverged. Known
+  # issues still matching their entry go in the collapsed section.
+  | [$failures[] | select(.classification == "new")] as $new
+  | [$failures[] | select(.classification != "new" and diverged)] as $div
+  | [$failures[] | select(.classification == "ongoing" and (diverged | not))] as $ongoing
+  | [$failures[] | select(.classification == "known_issue" and (diverged | not))] as $known
+  | [$failures[] | select((.classification == "new" or .classification == "ongoing"
+                           or .classification == "known_issue" or diverged) | not)] as $unclear
+  | ($new + $div) as $attention
+  | ($attention + $ongoing + $unclear) as $main_sorted
   | ($f.errors // []) as $errors
+  | [$quarantined | split("\n")[] | select(. != "") | split("\t") | {path: .[0], reason: (.[1] // "")}] as $withheld
   | ($cmdlog | split("\n") | map(select(test("\\S"))) | map(try fromjson catch null)) as $cmds_raw
   | [$cmds_raw[] | objects] as $cmds
   | ($cmds_raw | map(select(type != "object")) | length) as $bad_cmd_lines
@@ -292,14 +315,17 @@ program='
       ( if ($errors | length) > 0 then
           "**Errors reported:**", "", ($errors[] | "- \(text)"), ""
         else empty end ),
+      ( if ($withheld | length) > 0 then
+          "**Withheld from the artifact** (these files could not be redacted safely):", "",
+          ($withheld[] | "- \(.path | code)" + (if .reason != "" then ": \(.reason | text)" else "" end)), ""
+        else empty end ),
       "## Summary",
       "",
       ($f.summary | if . == "" or . == null then "_No summary._" else md end),
       "",
-      ( "**Failures:** \($main | map(select(.classification == "new")) | length) new, "
-        + "\($main | map(select(.classification == "ongoing")) | length) ongoing, "
-        + "\($main | map(select(.classification != "new" and .classification != "ongoing")) | length) unclear, "
-        + "\($known | length) known issues (\($diverged) diverged) · "
+      ( "**Needs attention:** \($attention | length) (\($new | length) new, \($div | length) diverged known issues) · "
+        + "**Also failing:** \($ongoing | length) ongoing, \($unclear | length) unclear, "
+        + "\($known | length) known issues still matching · "
         + "**Runs:** \(($f.runs // []) | length) triaged, \(($f.skipped_runs // []) | length) skipped" ),
       "",
       ( [ ($versions.action_ref // empty | "action \(code)"),
@@ -314,8 +340,7 @@ program='
           + (if .total_cost_usd then ", about $\(.total_cost_usd * 100 | round / 100) estimated cost" else "" end)
           + (if .duration_ms then ", \(.duration_ms | dur)" else "" end), "" ),
       ( ($inputs // {}) | if type == "object" then to_entries else [] end
-        | map(.key |= (ltrimstr("ATT_IN_") | ascii_downcase | gsub("_"; "-"))
-              | .value |= (if type == "string" then . else tojson end)
+        | map(.value |= (if type == "string" then . else tojson end)
               | select(.value != ""))
         | if length == 0 then "**Inputs:** all defaults.", ""
           else
@@ -341,19 +366,19 @@ program='
       "",
       ( if (($f.runs // []) | length) == 0 then "_No runs were triaged._"
         else
-          "| Run | Created | Group | Commit | Status | Failed (new) | Passed | Instrumentation | Report | Notes |",
+          "| Run | Created | Group | Commit | Status | Failed (needs attention) | Passed | Instrumentation | Report | Notes |",
           "|---|---|---|---|---|---|---|---|---|---|",
           ( $f.runs[] | . as $r
-            | ([$main[] | select(.classification == "new" and ((.failing_runs // []) | index([$r.run_id])))] | length) as $new
+            | ([$attention[] | select(in_run($r.run_id))] | length) as $needs
             | [ ($r.run_id | code),
                 ($r.created_at | created),
                 ($r.group | text),
                 ($r.commit | commit_md),
                 ($r.status | text),
-                "\($r.properties_failed) (\($new) new)",
+                "\($r.properties_failed) (\(if $needs > 0 then "**\($needs)**" else "0" end))",
                 "\($r.properties_passed)",
                 (if $r.instrumentation == "ok" then "ok" else "**\($r.instrumentation | text)**" end),
-                ($r.triage_report_url | if safe_url then "[triage report](\(strip_auth))" else "-" end),
+                ($r.triage_report_url | report_link),
                 ($r.notes | text) ]
             # Escape pipes once per cell (works inside code spans too).
             | "| " + (map(gsub("\\|"; "\\|")) | join(" | ")) + " |" )
@@ -361,13 +386,14 @@ program='
       "",
       "## Failures",
       "",
-      ( if ($main_sorted | length) == 0 then "_No new, ongoing, or unclear failures._", ""
-        else ($main_sorted | to_entries[] | (.value | render_failure(.key + 1)), "") end ),
-      ( "<details><summary>Known issues: \($known | length) matched (\($diverged) diverged), "
-        + "\(($f.known_issues_not_seen // []) | length) not seen</summary>" ),
+      ( if ($main_sorted | length) == 0 then "_No new, ongoing, unclear, or diverged failures._", ""
+        else ($main_sorted | to_entries[] | (.key as $i | .value | render_failure($i + 1)), "") end ),
+      ( "<details><summary>Known issues: \($known | length) still matching, "
+        + "\(($f.known_issues_not_seen // []) | length) not seen"
+        + (if ($div | length) > 0 then " (\($div | length) diverged, shown above)" else "" end) + "</summary>" ),
       "",
       ( if ($known | length) == 0 then "_No failures matched the `known-issues` input._", ""
-        else ($known | to_entries[] | (.value | render_failure(.key + 1)), "") end ),
+        else ($known | to_entries[] | (.key as $i | .value | render_failure($i + 1)), "") end ),
       ( if (($f.known_issues_not_seen // []) | length) > 0 then
           "**Known issues that did not occur in the selected runs:**", "",
           ($f.known_issues_not_seen[] | "- \(text)"), ""
@@ -448,7 +474,9 @@ jq -n -r \
   --arg repo_url "$repo_url" \
   --arg repo "${GITHUB_REPOSITORY:-}" \
   --arg run_url "$run_url" \
-  --arg artifact "$artifact_name" \
+  --arg artifact "${ATT_ARTIFACT_NAME:-}" \
+  --arg tenant "$tenant" \
+  --rawfile quarantined "$quarantined" \
   --arg sid "$session_id" \
   --arg transcripts "$transcripts" \
   --arg treason "$transcripts_reason" \

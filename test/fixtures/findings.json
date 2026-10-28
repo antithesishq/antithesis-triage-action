@@ -1,9 +1,9 @@
 {
   "schema_version": "0.1",
   "status": "complete",
-  "summary": "Triaged 3 runs of `glitch-grid` nightly on `main`. One **new** failure (`Balance stays nonnegative`) first appeared in run `r-0c3f` after commit `9f1e2d3`; it looks like a missing lock in `ledger::transfer`. The known issue \"Leader elected within 30s\" still occurs but now fails in a different container. Ping @octocat for review <img src=\"https://evil.example/pixel.gif\">.",
+  "summary": "Triaged 3 runs of `glitch-grid` nightly on `main`. One **new** failure (`Balance stays nonnegative`) first appeared in run `2c6fa5b630e543a92c98fbed4b555280-53-1` after commit `9f1e2d3`; it looks like a missing lock in `ledger::transfer`. The known issue \"Leader elected within 30s\" still occurs but now fails in a different container. Ping @octocat for review <img src=\"https://evil.example/pixel.gif\">.",
   "selection": {
-    "applied": "snouty runs list --since 7d, filtered to antithesis.source=main and antithesis.test_name=nightly; 4 runs found, 1 skipped (still starting).",
+    "applied": "snouty runs --json list -n 200 --created-after 2026-10-21, keeping runs with antithesis.source=main and antithesis.test_name=nightly; 4 runs found, 1 skipped (still starting).",
     "runs_considered": 4
   },
   "grouping": {
@@ -12,31 +12,31 @@
   },
   "runs": [
     {
-      "run_id": "r-0c3f",
+      "run_id": "2c6fa5b630e543a92c98fbed4b555280-53-1",
       "created_at": "2026-10-27T03:00:12Z",
       "group": "main/nightly",
       "status": "completed",
       "commit": "9f1e2d3c4b5a69788776655443322110ffeeddcc",
-      "triage_report_url": "https://acme.antithesis.com/report/r-0c3f/index.html",
+      "triage_report_url": "https://acme.antithesis.com/report/2c6fa5b630e543a92c98fbed4b555280-53-1/index.html",
       "properties_failed": 2,
       "properties_passed": 41,
       "instrumentation": "ok",
       "notes": "First run after the ledger refactor | PR #88"
     },
     {
-      "run_id": "r-0b77",
+      "run_id": "2c6fa5b630e543a92c98fbed4b555280-52-1",
       "created_at": "2026-10-26T03:00:09Z",
       "group": "main/nightly",
       "status": "completed",
       "commit": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
-      "triage_report_url": "https://acme.antithesis.com/report/r-0b77/index.html?auth=v2.public.SECRETSIGNATURE",
+      "triage_report_url": "https://acme.antithesis.com/report/2c6fa5b630e543a92c98fbed4b555280-52-1/index.html?auth=v2.public.SECRETSIGNATURE",
       "properties_failed": 1,
       "properties_passed": 42,
       "instrumentation": "ok",
       "notes": ""
     },
     {
-      "run_id": "r-0a12",
+      "run_id": "2c6fa5b630e543a92c98fbed4b555280-51-1",
       "created_at": "2026-10-25T03:00:05Z",
       "group": "main/nightly",
       "status": "incomplete",
@@ -49,20 +49,28 @@
     }
   ],
   "skipped_runs": [
-    { "run_id": "r-0d01", "reason": "Still starting; no results yet." }
+    {
+      "run_id": "2c6fa5b630e543a92c98fbed4b555280-54-1",
+      "reason": "Still starting; no results yet."
+    }
   ],
   "failures": [
     {
       "property": "Balance stays nonnegative",
       "run_group": "main/nightly",
       "classification": "new",
-      "failing_runs": ["r-0c3f"],
-      "baseline_runs": ["r-0b77", "r-0a12"],
-      "rate": "failed in 1/3 runs (first seen in r-0c3f)",
+      "failing_runs": [
+        "2c6fa5b630e543a92c98fbed4b555280-53-1"
+      ],
+      "baseline_runs": [
+        "2c6fa5b630e543a92c98fbed4b555280-52-1",
+        "2c6fa5b630e543a92c98fbed4b555280-51-1"
+      ],
+      "rate": "failed in 1/3 runs (first seen in 2c6fa5b630e543a92c98fbed4b555280-53-1)",
       "known_issue": null,
       "evidence": [
         {
-          "run_id": "r-0c3f",
+          "run_id": "2c6fa5b630e543a92c98fbed4b555280-53-1",
           "input_hash": "-1520695250096255483",
           "vtime": "67.7622960046865",
           "container": "bank",
@@ -73,40 +81,63 @@
       "confidence": "high",
       "category": "sut_bug",
       "source_refs": [
-        { "path": "src/ledger.rs", "line": 142, "commit": "9f1e2d3c4b5a69788776655443322110ffeeddcc", "note": "check-then-act on the balance" },
-        { "path": "src/ledger.rs", "line": null, "commit": null, "note": "accounts_lock removed here" },
-        { "path": "docs/locking notes.md", "line": 7, "commit": "9f1e2d3", "note": "documents the old locking scheme" }
+        {
+          "path": "src/ledger.rs",
+          "line": 142,
+          "commit": "9f1e2d3c4b5a69788776655443322110ffeeddcc",
+          "note": "check-then-act on the balance"
+        },
+        {
+          "path": "src/ledger.rs",
+          "line": null,
+          "commit": null,
+          "note": "accounts_lock removed here"
+        },
+        {
+          "path": "docs/locking notes.md",
+          "line": 7,
+          "commit": "9f1e2d3",
+          "note": "documents the old locking scheme"
+        }
       ],
       "suggested_fix": "Hold the account lock across the check and the update:\n\n```diff\n-    if acct.balance >= amount {\n+    let _g = self.accounts_lock.lock();\n+    if acct.balance >= amount {\n```\n\nSee <https://example.com/docs>.",
       "patch_file": "patches/balance-nonnegative.patch",
       "recommended_debug_session": {
-        "run_id": "r-0c3f",
+        "run_id": "2c6fa5b630e543a92c98fbed4b555280-53-1",
         "input_hash": "-1520695250096255483",
         "vtime": "67.7622960046865",
         "reason": "Moment just before the second transfer commits; logs don't show which thread held the lock.",
         "inspect": "Thread stacks of the `bank` process (gdb attach), and the contents of /var/lib/bank/ledger.wal."
       },
       "reproduce_commands": [
-        "snouty runs show r-0c3f",
-        "snouty runs search r-0c3f 'filter(ev => ev.antithesis_assert?.id == \"Balance stays nonnegative\")'"
+        "snouty runs --json show 2c6fa5b630e543a92c98fbed4b555280-53-1",
+        "snouty runs --json search 2c6fa5b630e543a92c98fbed4b555280-53-1 'filter(ev => ev.antithesis_assert?.id == \"Balance stays nonnegative\" && !ev.antithesis_assert.condition)'",
+        "snouty runs --json logs 2c6fa5b630e543a92c98fbed4b555280-53-1 -1520695250096255483 67.7622960046865"
       ]
     },
     {
       "property": "Leader elected within 30s",
       "run_group": "main/nightly",
       "classification": "known_issue",
-      "failing_runs": ["r-0c3f", "r-0b77", "r-0a12"],
-      "baseline_runs": ["r-0b77", "r-0a12"],
+      "failing_runs": [
+        "2c6fa5b630e543a92c98fbed4b555280-53-1",
+        "2c6fa5b630e543a92c98fbed4b555280-52-1",
+        "2c6fa5b630e543a92c98fbed4b555280-51-1"
+      ],
+      "baseline_runs": [
+        "2c6fa5b630e543a92c98fbed4b555280-52-1",
+        "2c6fa5b630e543a92c98fbed4b555280-51-1"
+      ],
       "rate": "failed in 3/3 runs",
       "known_issue": {
         "entry": "\"Leader elected within 30s\": tracked in #123",
         "status": "diverged",
-        "reason": "Matches by property name. Previously failed only in `raft-2`; in r-0c3f it also fails in `raft-0` with a different stack."
+        "reason": "Matches by property name. Previously failed only in `raft-2`; in 2c6fa5b630e543a92c98fbed4b555280-53-1 it also fails in `raft-0` with a different stack."
       },
       "evidence": [
         {
-          "run_id": "r-0c3f",
-          "input_hash": null,
+          "run_id": "2c6fa5b630e543a92c98fbed4b555280-53-1",
+          "input_hash": "4417706186129458731",
           "vtime": "120.5",
           "container": "raft-0",
           "excerpt": "election timeout after 31.2s (term 7)"
@@ -119,12 +150,29 @@
       "suggested_fix": "None beyond #123.",
       "patch_file": null,
       "recommended_debug_session": null,
-      "reproduce_commands": ["snouty runs logs r-0c3f --container raft-0"]
+      "reproduce_commands": [
+        "snouty runs --json properties --name \"Leader elected within 30s\" 2c6fa5b630e543a92c98fbed4b555280-53-1"
+      ]
     }
   ],
-  "known_issues_not_seen": ["\"Snapshot restores cleanly\": tracked in #140"],
-  "ignored": [ { "entry": "Harness heartbeat", "count": 3 } ],
-  "not_investigated": [ { "property": "Compaction finishes", "reason": "Budget: skipped after the two failures above." } ],
-  "run_health": ["r-0a12 is incomplete (setup timed out).", "Property \"Snapshot restores cleanly\" was never reached in r-0a12."],
+  "known_issues_not_seen": [
+    "\"Snapshot restores cleanly\": tracked in #140"
+  ],
+  "ignored": [
+    {
+      "entry": "Harness heartbeat",
+      "count": 3
+    }
+  ],
+  "not_investigated": [
+    {
+      "property": "Compaction finishes",
+      "reason": "Budget: skipped after the two failures above."
+    }
+  ],
+  "run_health": [
+    "2c6fa5b630e543a92c98fbed4b555280-51-1 is incomplete (setup timed out).",
+    "Property \"Snapshot restores cleanly\" was never reached in 2c6fa5b630e543a92c98fbed4b555280-51-1."
+  ],
   "errors": []
 }

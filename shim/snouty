@@ -42,6 +42,25 @@ finish() { # exit_code denied
   exit "$1"
 }
 
+# A call cut short by `timeout` or the Bash tool's time limit still gets its log
+# line (exit 128+n). The signal is passed on to the real snouty as TERM, since
+# a background child of a non-interactive shell ignores INT.
+child=""
+# shellcheck disable=SC2317 # called from the traps below
+on_signal() { # signal_number
+  trap '' INT TERM HUP
+  local code=$((128 + $1))
+  log_call "$code" "$(( $(date +%s%3N) - start_ms ))" false
+  if [ -n "$child" ]; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+  fi
+  exit "$code"
+}
+trap 'on_signal 1' HUP
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+
 deny() { # reason
   cat >&2 <<EOF
 snouty shim: denied: $display
@@ -150,8 +169,18 @@ if [ -z "$real" ] || [ ! -x "$real" ]; then
   finish 127 false
 fi
 
-# stdout and stderr each go through their own streaming filter. With pipefail
-# the status is the real binary's unless a filter itself fails.
+# stdout and stderr each go through their own streaming filter. The real
+# snouty runs in the background so that `wait` (unlike a foreground command)
+# lets the signal traps above run at once. Its stdin is /dev/null.
+exec 3> >(strip_auth)
+out_filter=$!
+exec 4> >(exec 3>&-; strip_auth >&2)
+err_filter=$!
+"$real" "$@" >&3 2>&4 3>&- 4>&- &
+child=$!
+exec 3>&- 4>&-
 rc=0
-{ "$real" "$@" 2>&1 1>&3 3>&- | strip_auth >&2 3>&-; } 3>&1 | strip_auth || rc=$?
+wait "$child" || rc=$?
+child=""
+wait "$out_filter" "$err_filter" 2>/dev/null || true
 finish "$rc" false

@@ -2,7 +2,8 @@
 # Refuse every trigger except `schedule` and `workflow_dispatch`.
 set -euo pipefail
 
-event="${GITHUB_EVENT_NAME:-}"
+# action.yml passes github.event_name as ATT_EVENT_NAME.
+event="${ATT_EVENT_NAME:-${GITHUB_EVENT_NAME:-}}"
 case "$event" in
   schedule|workflow_dispatch)
     echo "Triggered by '$event': OK."

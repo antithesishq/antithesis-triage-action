@@ -8,18 +8,22 @@
 # never re-scanned for placeholders.
 set -euo pipefail
 
-: "${ATT_ACTION_PATH:?ATT_ACTION_PATH is not set; the install step must run first}"
-: "${ATT_HOME:?ATT_HOME is not set}" "${ATT_OUT:?ATT_OUT is not set}" "${ATT_WORK:?ATT_WORK is not set}"
+: "${ATT_ACTION_PATH:?ATT_ACTION_PATH is not set}"
+# shellcheck source=scripts/env.sh
+. "$ATT_ACTION_PATH/scripts/env.sh"
 
 template="$ATT_ACTION_PATH/prompts/triage.md"
 schema="$ATT_ACTION_PATH/schema/findings.schema.json"
-scratch="$ATT_WORK/scratch"
-worktrees="$ATT_HOME/worktrees"
-mkdir -p "$ATT_WORK" "$ATT_OUT" "$scratch" "$worktrees"
+mkdir -p "$ATT_WORK" "$ATT_OUT" "$ATT_WORK/scratch" "$ATT_HOME/worktrees"
+# Physical paths, as in run-agent.sh's permission rules.
+out=$(cd "$ATT_OUT" && pwd -P)
+scratch=$(cd "$ATT_WORK/scratch" && pwd -P)
+worktrees=$(cd "$ATT_HOME/worktrees" && pwd -P)
 
-# The agent may run exactly this command (run-agent.sh builds the identical
-# exact-match allow rule), so use physical paths, shell-quoted.
-validate_cmd="$(printf '%q' "$(cd "$ATT_ACTION_PATH/scripts" && pwd -P)/validate-findings.sh") $(printf '%q' "$(cd "$ATT_OUT" && pwd -P)/findings.json")"
+# run-agent.sh allows exactly these command texts (physical paths, shell-quoted).
+scripts=$(cd "$ATT_ACTION_PATH/scripts" && pwd -P)
+checkout_cmd=$(printf '%q' "$scripts/att-checkout")
+validate_cmd="$(printf '%q' "$scripts/validate-findings.sh") $(printf '%q' "$out/findings.json")"
 
 # Keys match the action's input names.
 jq -n \
@@ -37,8 +41,12 @@ jq -n \
     ignore: $ignore, instructions: $instructions}' \
   > "$ATT_WORK/inputs.json"
 
+# Scheduled runs always run on the default branch, and their payload has no
+# .repository; other events carry it in the payload.
 default_branch=""
-if [[ -n "${GITHUB_EVENT_PATH-}" && -r "${GITHUB_EVENT_PATH}" ]]; then
+if [[ "${GITHUB_EVENT_NAME-}" == schedule ]]; then
+  default_branch="${GITHUB_REF_NAME-}"
+elif [[ -n "${GITHUB_EVENT_PATH-}" && -r "${GITHUB_EVENT_PATH}" ]]; then
   default_branch=$(jq -r '.repository.default_branch // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || true)
 fi
 
@@ -60,7 +68,7 @@ render='
       REPOSITORY: $repository, SHA: $sha, REF_NAME: $ref_name,
       DEFAULT_BRANCH: $default_branch, WORKSPACE: $workspace,
       ATT_OUT: $out, SCRATCH: $scratch, WORKTREES: $worktrees, NOW: $now,
-      TENANT: ($tenant | tenant), VALIDATE: $validate,
+      TENANT: ($tenant | tenant), VALIDATE: $validate, CHECKOUT: $checkout,
       SCHEMA: ($schema | fromjson | tojson),
       IN_RUNS: ($in.runs | block),
       IN_SINCE: ($in.since | block),
@@ -90,11 +98,12 @@ jq -n -r \
   --arg default_branch "${default_branch:-unknown}" \
   --arg workspace "${GITHUB_WORKSPACE:-$PWD}" \
   --arg tenant "${ANTITHESIS_TENANT-}" \
-  --arg out "$ATT_OUT" \
+  --arg out "$out" \
   --arg scratch "$scratch" \
   --arg worktrees "$worktrees" \
   --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg validate "$validate_cmd" \
+  --arg checkout "$checkout_cmd" \
   "$render" > "$tmp"
 mv "$tmp" "$ATT_WORK/prompt.md"
 

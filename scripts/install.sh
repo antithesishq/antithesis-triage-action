@@ -1,40 +1,40 @@
 #!/usr/bin/env bash
-# Install pinned snouty, Claude Code and the antithesis-triage skill, and export
-# the shared environment for the later steps (plans/contract.md).
+# Install pinned snouty, Claude Code and the antithesis-triage skill under
+# $ATT_HOME. Paths and per-step environment come from scripts/env.sh; nothing
+# is written to GITHUB_ENV or GITHUB_PATH.
 set -euo pipefail
 
 esc() { local s=$1; s=${s//'%'/'%25'}; s=${s//$'\r'/'%0D'}; s=${s//$'\n'/'%0A'}; printf '%s' "$s"; }
 die() { echo "::error::$(esc "$*")"; exit 1; }
 
-need_vars() {
-  for v in "$@"; do
-    [ -n "${!v:-}" ] || die "$v is not set (action.yml passes it to this step)."
-  done
-}
-need_vars ATT_ACTION_PATH ATT_HOME
+[ -n "${ATT_ACTION_PATH:-}" ] || die "ATT_ACTION_PATH is not set (action.yml passes it to this step)."
+# shellcheck source=scripts/env.sh
+. "$ATT_ACTION_PATH/scripts/env.sh"
 
-ATT_OUT="${ATT_OUT:-$ATT_HOME/out}"
-ATT_WORK="$ATT_HOME/work"
-CLAUDE_CONFIG_DIR="$ATT_HOME/claude-config"
-ATT_SNOUTY_REAL="$ATT_HOME/libexec/snouty"
-ATT_COMMANDS_LOG="$ATT_OUT/commands.log"
-export ATT_OUT ATT_WORK CLAUDE_CONFIG_DIR ATT_SNOUTY_REAL ATT_COMMANDS_LOG
+# sha256 of the default versions' downloads, pinned here so a replaced release
+# asset fails the install. Other versions fall back to the published checksums.
+declare -A PINNED_SHA256=(
+  [snouty-0.8.0-x86_64-unknown-linux-musl]=234fae94dd20130a7e723461de191ccaa839623fc519d7ae9ffff4c42cf49aca
+  [snouty-0.8.0-aarch64-unknown-linux-musl]=404e9d005d085cafe688bf0e94b811d8c67d3c68ded5d399f31bc19e6684a2f0
+  [claude-2.1.312-linux-x64]=4f4178ce41d83e23341ebfbaecdbcf8ea6bf7baea0690025abe49eeec3a5d01d
+  [claude-2.1.312-linux-arm64]=dc4af28917455e009d26704b82a438353a06149e825b6cdf782908b2d28661f5
+  [claude-2.1.312-linux-x64-musl]=78adef63924b762580b039c9ff0dd2ae44eb06171d467db62fd9040442505f76
+  [claude-2.1.312-linux-arm64-musl]=62555d1d87e4fff49298b70f306ef851fa167fc58b179958680f7c4d407a8c5c
+)
 
-# --- Environment first, so `if: always()` steps get it even if install fails. --
-env_vars=(ATT_ACTION_PATH ATT_HOME ATT_OUT ATT_WORK CLAUDE_CONFIG_DIR ATT_SNOUTY_REAL ATT_COMMANDS_LOG)
-for v in "${env_vars[@]}"; do
-  case ${!v} in *$'\n'*|*$'\r'*) die "$v contains a line break." ;; esac
+for v in ATT_SNOUTY_VERSION ATT_CLAUDE_CODE_VERSION ATT_SKILLS_REF; do
+  [ -n "${!v:-}" ] || die "$v is not set (action.yml passes it to this step)."
 done
-{
-  for v in "${env_vars[@]}"; do printf '%s=%s\n' "$v" "${!v}"; done
-  # Keep the pinned Claude Code version: no background self-update.
-  echo "DISABLE_AUTOUPDATER=1"
-} >> "${GITHUB_ENV:-/dev/null}"
-echo "$ATT_HOME/bin" >> "${GITHUB_PATH:-/dev/null}"
 
-mkdir -p "$ATT_HOME"/{bin,libexec,plugin,claude-config,worktrees} "$ATT_WORK" "$ATT_OUT"
-: >> "$ATT_COMMANDS_LOG"
-need_vars ATT_SNOUTY_VERSION ATT_CLAUDE_CODE_VERSION ATT_SKILLS_REF
+# A second use of the action in the same job must not see the first one's
+# findings, commands.log or session id.
+for d in "$ATT_OUT" "$ATT_WORK"; do
+  case $d in ""|/) die "Refusing to wipe '$d'." ;; esac
+done
+rm -rf "$ATT_OUT" "$ATT_WORK"
+mkdir -p "$ATT_HOME"/{bin,libexec,plugin,worktrees} "$CLAUDE_CONFIG_DIR" "$ATT_WORK" "$ATT_OUT"
+: > "$ATT_COMMANDS_LOG"
+: > "$SNOUTY_SETTINGS_PATH" # empty on purpose, see env.sh
 
 for tool in jq curl tar xz sha256sum; do
   command -v "$tool" >/dev/null 2>&1 ||
@@ -64,6 +64,9 @@ verify_sha256() { # file expected
   got=$(sha256sum "$1" | cut -d' ' -f1)
   [ "$got" = "$2" ] || die "Checksum mismatch for $(basename "$1"): expected $2, got $got."
 }
+not_pinned() { # what
+  echo "::warning::$1 is not one of the versions pinned in install.sh, so its checksum comes from the same place as the download and is not independently pinned."
+}
 
 # --- snouty ----------------------------------------------------------------------
 snouty_ver=${ATT_SNOUTY_VERSION#v}
@@ -75,12 +78,15 @@ snouty_ver=${ATT_SNOUTY_VERSION#v}
 echo "::group::Install snouty $snouty_ver ($snouty_target)"
 asset="snouty-$snouty_target.tar.xz"
 url="https://github.com/antithesishq/snouty/releases/download/v$snouty_ver/$asset"
+want=${PINNED_SHA256[snouty-$snouty_ver-$snouty_target]:-}
+if [ -z "$want" ]; then
+  not_pinned "snouty $snouty_ver ($snouty_target)"
+  fetch "$url.sha256" "$dl/$asset.sha256"
+  read -r want _ < "$dl/$asset.sha256" || true
+  want=${want,,}
+  [[ $want =~ ^[0-9a-f]{64}$ ]] || die "Could not read a SHA-256 checksum from $url.sha256."
+fi
 fetch "$url" "$dl/$asset"
-fetch "$url.sha256" "$dl/$asset.sha256"
-want=""
-read -r want _ < "$dl/$asset.sha256" || true
-want=${want,,}
-[[ $want =~ ^[0-9a-f]{64}$ ]] || die "Could not read a SHA-256 checksum from $url.sha256."
 verify_sha256 "$dl/$asset" "$want"
 tar -xJf "$dl/$asset" -C "$dl" "snouty-$snouty_target/snouty" ||
   die "$asset does not contain snouty-$snouty_target/snouty."
@@ -97,48 +103,23 @@ echo "shim -> $ATT_HOME/bin/snouty"
 echo "::endgroup::"
 
 # --- Claude Code -----------------------------------------------------------------
-# Native binary straight from the release bucket, checked against the release
-# manifest, whose detached signature is checked against Anthropic's pinned
-# release key (https://code.claude.com/docs/en/setup#binary-integrity-and-code-signing).
+# The native binary straight from the release bucket
+# (https://code.claude.com/docs/en/setup#binary-integrity-and-code-signing).
 CC_RELEASES=https://downloads.claude.ai/claude-code-releases
-CC_KEY_URL=https://downloads.claude.ai/keys/claude-code.asc
-CC_KEY_FPR=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
-
-verify_manifest_signature() { # manifest sig_url
-  if ! command -v gpg >/dev/null 2>&1; then
-    echo "::warning::gpg not found; the Claude Code manifest signature was not checked (the binary checksum still is)."
-    return 0
-  fi
-  if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$dl/manifest.json.sig" "$2"; then
-    echo "::warning::No manifest signature at $2 (published from 2.1.89 on); relying on the checksum only."
-    return 0
-  fi
-  fetch "$CC_KEY_URL" "$dl/claude-code.asc"
-  local gnupg status fprs
-  gnupg=$(mktemp -d)
-  gpg --homedir "$gnupg" --batch --quiet --import "$dl/claude-code.asc" >/dev/null 2>&1 ||
-    die "Could not import the Claude Code release key from $CC_KEY_URL."
-  status=$(gpg --homedir "$gnupg" --batch --status-fd 1 --verify "$dl/manifest.json.sig" "$1" 2>/dev/null) ||
-    die "The Claude Code $cc_ver manifest signature does not verify."
-  gpgconf --homedir "$gnupg" --kill all >/dev/null 2>&1 || true
-  rm -rf "$gnupg"
-  fprs=$(awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print $NF }' <<<"$status")
-  [[ $'\n'$fprs$'\n' == *$'\n'$CC_KEY_FPR$'\n'* ]] ||
-    die "The Claude Code manifest is not signed by the pinned release key $CC_KEY_FPR."
-  echo "manifest signature: good ($CC_KEY_FPR)"
-}
-
 cc_ver=$ATT_CLAUDE_CODE_VERSION
 [[ $cc_ver =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
   die "claude-code-version must be an exact release like 2.1.312 (got '$cc_ver')."
 
 echo "::group::Install Claude Code $cc_ver ($cc_platform)"
-fetch "$CC_RELEASES/$cc_ver/manifest.json" "$dl/manifest.json"
-verify_manifest_signature "$dl/manifest.json" "$CC_RELEASES/$cc_ver/manifest.json.sig"
-[ "$(jq -r '.version' "$dl/manifest.json")" = "$cc_ver" ] ||
-  die "The Claude Code manifest at $CC_RELEASES/$cc_ver is for another version."
-want=$(jq -r --arg p "$cc_platform" '.platforms[$p].checksum // empty' "$dl/manifest.json")
-[[ $want =~ ^[0-9a-f]{64}$ ]] || die "Claude Code $cc_ver has no $cc_platform build."
+want=${PINNED_SHA256[claude-$cc_ver-$cc_platform]:-}
+if [ -z "$want" ]; then
+  not_pinned "Claude Code $cc_ver ($cc_platform)"
+  fetch "$CC_RELEASES/$cc_ver/manifest.json" "$dl/manifest.json"
+  [ "$(jq -r '.version' "$dl/manifest.json")" = "$cc_ver" ] ||
+    die "The Claude Code manifest at $CC_RELEASES/$cc_ver is for another version."
+  want=$(jq -r --arg p "$cc_platform" '.platforms[$p].checksum // empty' "$dl/manifest.json")
+  [[ $want =~ ^[0-9a-f]{64}$ ]] || die "Claude Code $cc_ver has no $cc_platform build."
+fi
 fetch "$CC_RELEASES/$cc_ver/$cc_platform/claude" "$dl/claude"
 verify_sha256 "$dl/claude" "$want"
 mv -f "$dl/claude" "$ATT_HOME/bin/claude"
@@ -151,14 +132,13 @@ echo "::endgroup::"
 
 # --- antithesis-triage skill as a single-skill plugin ------------------------------
 ref=$ATT_SKILLS_REF
-[[ $ref =~ ^[A-Za-z0-9._/-]+$ ]] || die "skills-ref '$ref' is not a valid git ref."
-echo "::group::Install the antithesis-triage skill (antithesishq/antithesis-skills@$ref)"
 [[ $ref =~ ^[0-9a-f]{40}$ ]] ||
-  echo "::warning::skills-ref '$ref' is not a full commit SHA, so the skill version is not pinned."
+  die "skills-ref must be a full 40-character commit SHA of antithesishq/antithesis-skills (got '$ref')."
+echo "::group::Install the antithesis-triage skill (antithesishq/antithesis-skills@$ref)"
 fetch "https://codeload.github.com/antithesishq/antithesis-skills/tar.gz/$ref" "$dl/skills.tar.gz"
 tar -tzf "$dl/skills.tar.gz" > "$dl/skills.list" || die "The antithesis-skills download is not a tarball."
 top=$(sed -n '1{s#/.*##;p;}' "$dl/skills.list")
-[[ $top == antithesis-skills-* ]] ||
+[ "$top" = "antithesis-skills-$ref" ] ||
   die "Unexpected top-level directory '$top' in the antithesis-skills tarball."
 awk -v t="$top/" 'index($0, t) != 1 { bad = 1 } END { exit bad }' "$dl/skills.list" ||
   die "The antithesis-skills tarball has entries outside $top/."
@@ -179,7 +159,7 @@ jq -n --arg ref "$ref" '{
 echo "::endgroup::"
 
 # --- versions.json and session id --------------------------------------------------
-# GITHUB_ACTION_REF is often empty inside composite actions, so fall back to the
+# github.action_ref can be empty inside composite actions, so fall back to the
 # ref in the action's checkout path (.../_actions/<owner>/<repo>/<ref>).
 action_ref=${ATT_ACTION_REF:-${GITHUB_ACTION_REF:-}}
 if [ -z "$action_ref" ]; then

@@ -7,6 +7,12 @@ set -euo pipefail
 esc() { local s=$1; s=${s//'%'/'%25'}; s=${s//$'\r'/'%0D'}; s=${s//$'\n'/'%0A'}; printf '%s' "$s"; }
 die() { echo "::error::$(esc "$*")"; exit 1; }
 
+[ -n "${ATT_ACTION_PATH:-}" ] || die "ATT_ACTION_PATH is not set (action.yml passes it to this step)."
+# env.sh pins ANTITHESIS_BASE_URL and an empty SNOUTY_SETTINGS_PATH, so a
+# .snouty.toml in the repo can't redirect the API key.
+# shellcheck source=scripts/env.sh
+. "$ATT_ACTION_PATH/scripts/env.sh"
+
 [ -n "${ANTITHESIS_API_KEY:-}" ] ||
   die "ANTITHESIS_API_KEY is not set. Pass it to the action step from a secret: env: ANTITHESIS_API_KEY: \${{ secrets.ANTITHESIS_API_KEY }}"
 [ -n "${ANTITHESIS_TENANT:-}" ] ||
@@ -24,23 +30,14 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ] &&
   die "$msg"
 fi
 
-# snouty also reads ./.snouty.toml from the working directory (the customer's
-# repo), whose base_url could send the API key elsewhere. Environment variables
-# override settings files, so pin the API host and use an empty settings file.
-if [ -z "${ANTITHESIS_BASE_URL:-}" ]; then
-  export ANTITHESIS_BASE_URL="https://${ANTITHESIS_TENANT}.antithesis.com"
-fi
-export SNOUTY_SETTINGS_PATH="${ATT_HOME:?}/snouty-settings.toml"
-: > "$SNOUTY_SETTINGS_PATH"
-if [ -n "${GITHUB_ENV:-}" ]; then
-  printf 'ANTITHESIS_BASE_URL=%s\nSNOUTY_SETTINGS_PATH=%s\n' "$ANTITHESIS_BASE_URL" "$SNOUTY_SETTINGS_PATH" >> "$GITHUB_ENV"
-fi
 
 snouty="${ATT_SNOUTY_REAL:-}"
 if [ -z "$snouty" ] || [ ! -x "$snouty" ]; then
   die "snouty is not installed (ATT_SNOUTY_REAL='$snouty'). Did the install step fail?"
 fi
 command -v jq >/dev/null 2>&1 || die "jq is required but was not found on PATH."
+[ -f "$SNOUTY_SETTINGS_PATH" ] ||
+  die "snouty's settings file $SNOUTY_SETTINGS_PATH is missing. Did the install step fail?"
 
 # doctor exits 1 when a check fails but still prints its JSON report.
 err=$(mktemp)

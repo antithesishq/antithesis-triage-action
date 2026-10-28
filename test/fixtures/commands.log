@@ -1,6 +1,7 @@
-{"ts":"2026-10-28T03:01:02Z","argv":["--json","runs","list","--since","7d"],"exit":0,"duration_ms":812,"denied":false}
-{"ts":"2026-10-28T03:01:10Z","argv":["runs","show","r-0c3f"],"exit":0,"duration_ms":420,"denied":false}
-{"ts":"2026-10-28T03:02:31Z","argv":["runs","search","r-0c3f","filter(ev => ev.antithesis_assert?.id == \"Balance stays nonnegative\")"],"exit":0,"duration_ms":2310,"denied":false}
-{"ts":"2026-10-28T03:03:00Z","argv":["launch","--duration","30"],"exit":126,"duration_ms":3,"denied":true}
-{"ts":"2026-10-28T03:03:40Z","argv":["runs","logs","r-0c3f","--grep","it's\nmultiline"],"exit":1,"duration_ms":15001,"denied":false}
+{"ts":"2026-10-28T03:01:02Z","argv":["doctor","--json"],"exit":0,"duration_ms":1240,"denied":false}
+{"ts":"2026-10-28T03:01:05Z","argv":["runs","--json","list","-n","200","--created-after","2026-10-21"],"exit":0,"duration_ms":812,"denied":false}
+{"ts":"2026-10-28T03:01:10Z","argv":["runs","--json","show","2c6fa5b630e543a92c98fbed4b555280-53-1"],"exit":0,"duration_ms":420,"denied":false}
+{"ts":"2026-10-28T03:02:31Z","argv":["runs","--json","search","2c6fa5b630e543a92c98fbed4b555280-53-1","filter(ev => ev.output_text?.includes(\"can't\"))\n  .limit(5)"],"exit":0,"duration_ms":2310,"denied":false}
+{"ts":"2026-10-28T03:03:00Z","argv":["debug","--run-id","2c6fa5b630e543a92c98fbed4b555280-53-1","--input-hash","-1520695250096255483","--vtime","67.7622960046865","--title","Balance stays nonnegative 2026-10-28"],"exit":126,"duration_ms":3,"denied":true}
+{"ts":"2026-10-28T03:03:40Z","argv":["runs","--json","logs","2c6fa5b630e543a92c98fbed4b555280-53-1","-1520695250096255483","67.7622960046865"],"exit":1,"duration_ms":15001,"denied":false}
 {"ts":"2026-10-28T03:04:

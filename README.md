@@ -56,18 +56,26 @@ lines) passed to the agent, which applies them with `snouty`.
 | `max-turns` / `max-budget-usd` / `timeout-minutes` | `200` / `10` / `60` | Hard caps on the agent session. |
 | `upload-transcript` | `auto` | `auto`: only on private repositories. |
 | `retention-days` | `14` | Artifact retention. |
+| `artifact-name` | `antithesis-triage-<job>-<attempt>` | Set a unique name per matrix job or per invocation if the action runs more than once in a workflow run. |
 
 Model credentials: `ANTHROPIC_API_KEY`, or Amazon Bedrock / Google Vertex AI
 via the standard Claude Code environment variables
 (`CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` plus cloud
-credentials, e.g. from an OIDC step).
+credentials). With Bedrock or Vertex:
+
+- set `model` to that provider's model ID (the default is an Anthropic API ID);
+- if you get cloud credentials through OIDC in an earlier step, that job also
+  needs `permissions: id-token: write`.
 
 ## Safety
 
-- **Read-only.** The workflow needs only `contents: read`. The agent never
+- **Read-only.** The workflow needs only `contents: read` (plus
+  `id-token: write` if you use OIDC for Bedrock/Vertex). The agent never
   pushes, opens PRs, launches Antithesis runs, or starts debugging sessions.
   A `snouty` wrapper blocks `launch`, `debug`, `runs exec`, `runs cancel` and
-  similar commands, and logs every command the agent runs.
+  similar commands, and logs every snouty command the agent runs. The agent's
+  other tools are limited to read-only git, `jq`, and edits to its own output
+  files.
 - **Triggers.** Only `schedule` and `workflow_dispatch` are allowed. Pull
   request and comment events are refused.
 - **Untrusted input.** Logs and run metadata are treated as data, not

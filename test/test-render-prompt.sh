@@ -51,6 +51,10 @@ grep -qF -- '${ATT_OUT} %s %%' "$prompt"; ok $? "dollar and percent text survive
 grep -q '^````text$' "$prompt"; ok $? "fence grows past backtick runs in the input"
 grep -qF '`acme` (from `ANTITHESIS_TENANT`)' "$prompt"; ok $? "tenant is rendered"
 grep -qF 'default branch `trunk`' "$prompt"; ok $? "default branch comes from the event payload"
+checkout="$(cd "$root/scripts" && pwd -P)/att-checkout"
+grep -qF -- "\`$checkout <40-hex-sha> [patch-<slug>]\`" "$prompt" && grep -qF -- "\`$checkout <sha> patch-<slug>\`" "$prompt"
+ok $? "att-checkout is rendered with its physical path"
+! grep -qE 'git (fetch|worktree add)' "$prompt"; ok $? "the prompt no longer suggests git fetch or git worktree add"
 grep -qF "\`$tmp/home/out/findings.json\`" "$prompt"; ok $? "ATT_OUT path is rendered"
 grep -qF "$tmp/home/work/scratch" "$prompt" && [ -d "$tmp/home/work/scratch" ]; ok $? "scratch dir is rendered and created"
 grep -qF '"schema_version":{"const":"0.1"}' "$prompt"; ok $? "schema is embedded"
@@ -64,14 +68,18 @@ token=$(sed -n 's/^::stop-commands::\(att-[0-9a-f]*\)$/\1/p' "$tmp/log")
 awk -v t="::$token::" '/^::stop-commands::/ {on = 1} $0 == t {on = 0} /^::error::/ && !on {bad = 1} END {exit bad}' "$tmp/log" && grep -qx "::$token::" "$tmp/log"
 ok $? "input lines that look like workflow commands are fenced by stop-commands"
 
-render "$root"
+echo '{"schedule":"0 7 * * *"}' > "$tmp/event.json"
+render "$root" GITHUB_EVENT_NAME=schedule
+grep -qF 'default branch `main`' "$prompt"; ok $? "scheduled runs use GITHUB_REF_NAME as the default branch"
+render "$root" GITHUB_EVENT_NAME=workflow_dispatch
+grep -qF 'default branch `unknown`' "$prompt"; ok $? "payload without .repository renders unknown"
 [ "$(grep -c '^(not set)$' "$prompt")" -eq 9 ]; ok $? "renders with every input unset"
 grep -qF 'not set in the environment; snouty resolves it' "$prompt"; ok $? "missing tenant falls back to snouty's configuration"
 
 # A template with an unknown placeholder must fail loudly.
 mkdir -p "$tmp/action/prompts" "$tmp/action/schema" "$tmp/action/scripts"
 cp "$root/schema/findings.schema.json" "$tmp/action/schema/"
-cp "$root/scripts/render-prompt.sh" "$tmp/action/scripts/"
+cp "$root/scripts/render-prompt.sh" "$root/scripts/env.sh" "$tmp/action/scripts/"
 printf '/antithesis-skills:antithesis-triage\n{{REPOSITORY}} {{NO_SUCH_THING}}\n' > "$tmp/action/prompts/triage.md"
 if render "$tmp/action"; then rc=1; else grep -q 'NO_SUCH_THING' "$tmp/log"; rc=$?; fi
 ok "$rc" "unknown placeholder fails the render"

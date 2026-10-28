@@ -20,6 +20,7 @@ case "${FAKE_MODE:-}" in
   big) seq 1 200000; exit "${FAKE_EXIT:-0}" ;;
   stream) echo first; while [ ! -e "$FAKE_GO" ]; do sleep 0.05; done; echo second; exit 0 ;;
   noeol) printf 'x?auth=TOK'; exit 0 ;;
+  hang) echo $$ > "$FAKE_PID"; echo started; while :; do sleep 0.1; done ;;
 esac
 echo "ARGS:$(printf ' [%s]' "$@")"
 echo 'url: "https://t.antithesis.com/report/abc/x.html?auth=v2.public.SECRET1"'
@@ -200,6 +201,35 @@ check "argv logged exactly (newline, dash, empty, quote)" \
   '[[ $(head -n 1 "$ATT_COMMANDS_LOG" | jq -c .argv) == "[\"runs\",\"search\",\"R1\",\"multi\\nline\",\"-dash\",\"\",\"it'\''s\"]" ]]'
 check "denied call logged with exit 126" \
   '[[ $(tail -n 1 "$ATT_COMMANDS_LOG" | jq -c "[.argv, .exit, .denied]") == "[[\"launch\",\"--duration\",\"30\"],126,true]" ]]'
+
+# --- Calls cut short by a signal are still logged, and the real snouty stops. -------------
+export FAKE_PID="$tmp/fake.pid"
+gone() { # pid: true once the process has exited
+  local _
+  for _ in $(seq 1 50); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.1; done
+  return 1
+}
+
+: > "$ATT_COMMANDS_LOG"; rm -f "$FAKE_PID"
+rc=0
+FAKE_MODE=hang timeout 1 "$shim" --json runs logs R1 H1 > /dev/null 2>&1 || rc=$?
+check "timeout: killed call exits 124 via timeout" '[ "$rc" -eq 124 ]'
+check "timeout: call logged with exit 143" \
+  '[[ $(jq -c "[.argv, .exit, .denied]" "$ATT_COMMANDS_LOG") == "[[\"--json\",\"runs\",\"logs\",\"R1\",\"H1\"],143,false]" ]]'
+check "timeout: real snouty stopped" '[ -s "$FAKE_PID" ] && gone "$(cat "$FAKE_PID")"'
+
+for sig in TERM:143 HUP:129; do
+  : > "$ATT_COMMANDS_LOG"; rm -f "$FAKE_PID" "$tmp/sig.out"
+  FAKE_MODE=hang "$shim" runs logs R1 H1 > "$tmp/sig.out" 2>/dev/null &
+  pid=$!
+  for _ in $(seq 1 50); do grep -q started "$tmp/sig.out" 2>/dev/null && break; sleep 0.1; done
+  kill -s "${sig%:*}" "$pid"   # the shim only, not its process group
+  rc=0; wait "$pid" || rc=$?
+  check "SIG${sig%:*} to the shim alone: exits ${sig#*:}" '[ "$rc" -eq "${sig#*:}" ]'
+  check "SIG${sig%:*} to the shim alone: logged with exit ${sig#*:}" \
+    '[ "$(wc -l < "$ATT_COMMANDS_LOG")" -eq 1 ] && [ "$(jq -r .exit "$ATT_COMMANDS_LOG")" = "${sig#*:}" ]'
+  check "SIG${sig%:*} to the shim alone: forwarded to the real snouty" '[ -s "$FAKE_PID" ] && gone "$(cat "$FAKE_PID")"'
+done
 
 # --- Locating the real binary. -------------------------------------------------------------
 ATT_SNOUTY_REAL=/bin/false run runs list

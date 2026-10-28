@@ -14,6 +14,7 @@ lacks() { ! grep -qF -- "$1" "$2"; ok $? "$3"; }
 
 mkdir -p "$tmp/bin" "$tmp/fake" "$tmp/action/scripts"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/action/scripts/validate-findings.sh"
+cp "$here/../scripts/env.sh" "$here/../scripts/att-checkout" "$tmp/action/scripts/"
 chmod +x "$tmp/action/scripts/validate-findings.sh"
 cat > "$tmp/bin/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -30,6 +31,11 @@ case "$FAKE_CLAUDE_MODE" in
     echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"TOOL-OUTPUT-SECRET"}]}}'
     echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"jq -r JQ-FILTER-NOT-SHOWN /x"}},{"type":"tool_use","id":"t3","name":"Edit","input":{"file_path":"/x/findings.json"}}]}}'
     echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t4","name":"Bash","input":{"command":"timeout 600 snouty runs show https://t.antithesis.com/report/x.html?auth=SIGNED-AUTH\nsecond line"}}]}}'
+    echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t6","name":"Bash","input":{"command":"COVERT-PROGRAM-NAME arg"}},{"type":"tool_use","id":"t7","name":"COVERT-TOOL-NAME","input":{}},{"type":"tool_use","id":"t8","name":"Bash","input":{"command":"snouty COVERT-SUBCOMMAND"}},{"type":"tool_use","id":"t9","name":"Bash","input":{"command":"/x/scripts/att-checkout 0123 COVERT-ARG"}}]}}'
+    # Leftovers that must not outlive the step: a plain background job and one
+    # in its own session (like the Bash tool's commands).
+    sleep 300 >/dev/null 2>&1 < /dev/null & echo $! > "$FAKE_DIR/bg1"
+    setsid sleep 300 >/dev/null 2>&1 < /dev/null & echo $! > "$FAKE_DIR/bg2"
     echo '{"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"t5","message":"denied"}'
     echo 'not json at all'
     echo '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"total_cost_usd":0.1234,"permission_denials":[{}],"result":"FINAL-TEXT"}'
@@ -66,6 +72,8 @@ run_agent() {
     ATT_ACTION_PATH="$tmp/action" ATT_HOME="$tmp/home" ATT_OUT="$tmp/home/out" ATT_WORK="$tmp/home/work" GITHUB_WORKSPACE="$tmp/ws" \
     ATT_MODEL=claude-test ATT_MAX_TURNS=7 ATT_MAX_BUDGET_USD=1.5 ATT_TIMEOUT_MINUTES=5 \
     GITHUB_TOKEN=ghs_not_for_the_agent GITHUB_ENV="$tmp/github_env" ANTITHESIS_API_KEY=kept \
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN=idtok ACTIONS_ID_TOKEN_REQUEST_URL=https://id ACTIONS_RUNTIME_URL=https://rt \
+    ACTIONS_RESULTS_URL=https://res ACTIONS_CACHE_URL=https://cache ACTIONS_RUNTIME_TOKEN=rttok \
     "$@" bash "$script" > "$tmp/out" 2>&1 || rc=$?
 }
 work="$tmp/home/work"
@@ -75,9 +83,12 @@ ok "$rc" "success exits 0"
 args="$tmp/fake/args"
 for flag in -p --bare --verbose "--permission-prompts" none --setting-sources user \
             --tools Bash,Read,Edit --disallowedTools "Bash(cd *)" "Bash(snouty *)" "Bash(jq *)" \
-            "Bash(git worktree add *)" "Bash(git fetch origin *)" "Edit(/$tmp/home/out/**)"; do
+            "Bash($tmp/action/scripts/att-checkout *)" "Edit(/$tmp/home/out/findings.json)" \
+            "Edit(/$tmp/home/out/patches/**)" "Edit(/$tmp/home/work/scratch/**)" "Edit(/$tmp/home/worktrees/**)"; do
   grep -qxF -- "$flag" "$args"; ok $? "passes $flag"
 done
+! grep -qE '^Bash\(git |^Edit\(/'"$tmp"'/home/out/\*\*\)$' "$args"; ok $? "no git rules and no Edit rule for all of ATT_OUT"
+[ "$(grep -c '^Edit(' "$args")" -eq 4 ]; ok $? "exactly four Edit rules"
 grep -A1 -xF -- --permission-mode "$args" | grep -qxF dontAsk; ok $? "permission mode is dontAsk"
 grep -qxF -- "Bash($tmp/action/scripts/validate-findings.sh $tmp/home/out/findings.json)" "$args"; ok $? "allows exactly the validator on findings.json"
 [ "$(grep -c 'validate-findings' "$args")" -eq 1 ]; ok $? "no other rule mentions the validator"
@@ -95,17 +106,32 @@ cmp -s "$tmp/fake/stdin" "$work/prompt.md"; ok $? "prompt arrives on stdin, unto
 [ "$(cat "$tmp/fake/cwd")" = "$tmp/ws" ]; ok $? "runs in GITHUB_WORKSPACE"
 lacks GITHUB_TOKEN= "$tmp/fake/env" "GITHUB_TOKEN is not passed to the agent"
 lacks GITHUB_ENV= "$tmp/fake/env" "GITHUB_ENV is not passed to the agent"
+for v in ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_RUNTIME_URL ACTIONS_RESULTS_URL ACTIONS_CACHE_URL ACTIONS_RUNTIME_TOKEN; do
+  lacks "$v=" "$tmp/fake/env" "$v is not passed to the agent"
+done
+has GIT_CONFIG_GLOBAL=/dev/null "$tmp/fake/env" "global git config is disabled for the agent"
+has GIT_CONFIG_NOSYSTEM=1 "$tmp/fake/env" "system git config is disabled for the agent"
+for f in bg1 bg2; do
+  pid=$(cat "$tmp/fake/$f"); ! kill -0 "$pid" 2>/dev/null; ok $? "agent leftover $f is killed when claude exits"
+done
 has ANTITHESIS_API_KEY=kept "$tmp/fake/env" "other env is passed through"
-[ "$(wc -l < "$work/stream.jsonl")" -eq 8 ]; ok $? "stream.jsonl captures every line"
+[ "$(wc -l < "$work/stream.jsonl")" -eq 9 ]; ok $? "stream.jsonl captures every line"
 jq -e '.type == "result" and .subtype == "success"' "$work/agent-result.json" > /dev/null; ok $? "agent-result.json holds the result line"
 jq -e '.model == "claude-test" and .snouty == "0.8.0"' "$work/versions.json" > /dev/null; ok $? "versions.json gains model, keeps the rest"
 [ -d "$tmp/home/out/patches" ] && [ -d "$work/scratch" ]; ok $? "creates patches and scratch dirs"
 has "[agent] session started: Claude Code 9.9.9, model claude-test" "$tmp/out" "prints the session start"
-has "[agent] Bash: snouty runs --json list -n 200" "$tmp/out" "prints snouty commands"
-has "[agent] Bash (jq)" "$tmp/out" "prints only the program name for other commands"
-has "[agent] Edit" "$tmp/out" "prints other tool names"
+has "[agent] Bash: snouty runs list" "$tmp/out" "prints the snouty subcommand"
+lacks "-n 200" "$tmp/out" "never prints snouty arguments"
+has "[agent] Bash: snouty runs show" "$tmp/out" "skips a leading timeout"
+has "[agent] Bash: jq" "$tmp/out" "prints only the program name for other commands"
+has "[agent] Edit" "$tmp/out" "prints known tool names"
 has "[agent]   denied: Bash" "$tmp/out" "prints permission denials"
-has "report/x.html second line" "$tmp/out" "flattens multi-line commands and strips ?auth="
+has "[agent] Bash: other" "$tmp/out" "unknown programs print as other"
+has "[agent] other tool" "$tmp/out" "unknown tool names print as other tool"
+has "[agent] Bash: snouty (other)" "$tmp/out" "unknown snouty subcommands print as (other)"
+has "[agent] Bash: att-checkout" "$tmp/out" "att-checkout prints without arguments"
+lacks COVERT "$tmp/out" "no agent-chosen text reaches the log"
+lacks report/x.html "$tmp/out" "never prints URLs"
 lacks SIGNED-AUTH "$tmp/out" "never prints signed auth tokens"
 lacks TOOL-OUTPUT-SECRET "$tmp/out" "never prints tool output"
 lacks JQ-FILTER-NOT-SHOWN "$tmp/out" "never prints non-snouty/git commands"

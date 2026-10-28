@@ -67,6 +67,10 @@ inputs:
     description: Artifact retention in days.
     required: false
     default: '14'
+  artifact-name:
+    description: Artifact name. Set a unique name per matrix job or per invocation if the action runs more than once in a workflow run.
+    required: false
+    default: antithesis-triage-${{ github.job }}-${{ github.run_attempt }}
   github-token:
     description: Token used only to read repository visibility (for upload-transcript auto). Needs no write scopes.
     required: false
@@ -105,6 +109,7 @@ runs:
       shell: bash
       env:
         ATT_ACTION_PATH: ${{ github.action_path }}
+        ATT_EVENT_NAME: ${{ github.event_name }}
       run: '"$ATT_ACTION_PATH/scripts/check-event.sh"'
 
     - name: Install snouty, Claude Code and the triage skill
@@ -112,8 +117,6 @@ runs:
       env:
         ATT_ACTION_PATH: ${{ github.action_path }}
         ATT_ACTION_REF: ${{ github.action_ref }}
-        ATT_HOME: ${{ runner.temp }}/antithesis-triage
-        ATT_OUT: ${{ runner.temp }}/antithesis-triage/out
         ATT_CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
         ATT_SNOUTY_VERSION: ${{ inputs.snouty-version }}
         ATT_SKILLS_REF: ${{ inputs.skills-ref }}
@@ -121,11 +124,14 @@ runs:
 
     - name: Preflight
       shell: bash
+      env:
+        ATT_ACTION_PATH: ${{ github.action_path }}
       run: '"$ATT_ACTION_PATH/scripts/preflight.sh"'
 
     - name: Render prompt
       shell: bash
       env:
+        ATT_ACTION_PATH: ${{ github.action_path }}
         ATT_IN_RUNS: ${{ inputs.runs }}
         ATT_IN_SINCE: ${{ inputs.since }}
         ATT_IN_LIMIT: ${{ inputs.limit }}
@@ -141,6 +147,7 @@ runs:
       id: agent
       shell: bash
       env:
+        ATT_ACTION_PATH: ${{ github.action_path }}
         ATT_MODEL: ${{ inputs.model }}
         ATT_MAX_TURNS: ${{ inputs.max-turns }}
         ATT_MAX_BUDGET_USD: ${{ inputs.max-budget-usd }}
@@ -152,17 +159,20 @@ runs:
       if: always()
       shell: bash
       env:
+        ATT_ACTION_PATH: ${{ github.action_path }}
         ATT_UPLOAD_TRANSCRIPT: ${{ inputs.upload-transcript }}
         ATT_GITHUB_TOKEN: ${{ inputs.github-token }}
         ATT_AGENT_OUTCOME: ${{ steps.agent.outcome }}
+        ATT_ARTIFACT_NAME: ${{ inputs.artifact-name }}
       run: '"$ATT_ACTION_PATH/scripts/finalize.sh"'
 
+    # Only upload once finalize has redacted everything in the output dir.
     - name: Upload artifact
       id: upload
-      if: always() && env.ATT_OUT != ''
-      uses: actions/upload-artifact@v4
+      if: always() && steps.finalize.outputs.redacted == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
-        name: antithesis-triage-${{ github.run_number }}-${{ github.run_attempt }}
-        path: ${{ env.ATT_OUT }}
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/antithesis-triage/out
         retention-days: ${{ inputs.retention-days }}
         if-no-files-found: warn

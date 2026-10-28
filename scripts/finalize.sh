@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Finalize the triage run (runs with `if: always()`): make sure a valid
-# findings.json exists, collect transcripts if enabled, redact the artifact,
-# render report.md, write the job summary and step outputs, and pick the exit
-# code. Tolerates any earlier step having failed, including ATT_OUT unset.
+# findings.json exists, collect transcripts if enabled, redact, render
+# report.md, write the job summary and step outputs, and pick the exit code.
+# Tolerates any earlier step having failed or not run.
+#
+# Nothing unredacted is placed in ATT_OUT: transcripts are built and redacted
+# in ATT_WORK first. The step output `redacted` is set to true only after the
+# final redaction pass over ATT_OUT succeeds; the upload step depends on it.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-action_path=${ATT_ACTION_PATH:-$(dirname "$here")}
-schema=$action_path/schema/findings.schema.json
+ATT_ACTION_PATH=${ATT_ACTION_PATH:-$(dirname "$here")}
+schema=$ATT_ACTION_PATH/schema/findings.schema.json
 outcome=${ATT_AGENT_OUTCOME:-}
 summary_limit=$((1024 * 1024 - 8192)) # job summaries are capped at 1 MiB
 
@@ -20,35 +24,54 @@ append_summary() {
 exit_code_for() {
   if [[ $outcome != success || $1 == failed ]]; then echo 1; else echo 0; fi
 }
-
-if [[ -z ${ATT_OUT:-} ]]; then
-  echo "::error::Antithesis triage did not get far enough to produce a report (setup failed; agent step: ${outcome:-not run})."
-  printf '%s\n' "**Antithesis triage failed** before producing a report: setup did not complete (agent step: ${outcome:-not run}). See the job log." | append_summary
+stop_early() { # message: summary line, failed status, no artifact
+  echo "::error::$1"
+  printf '**Antithesis triage did not run.** %s\n' "$1" | append_summary
   set_output status failed
+  set_output redacted false
   exit 1
+}
+
+# --- 0. refused, or nowhere to write --------------------------------------------
+event=${ATT_EVENT_NAME:-${GITHUB_EVENT_NAME:-}}
+if [[ -n $event && $event != schedule && $event != workflow_dispatch ]]; then
+  stop_early "It runs only on \`schedule\` and \`workflow_dispatch\` events, not \`$event\`, so the \"Check triggering event\" step stopped it before any secrets were used. Nothing was triaged and no artifact was uploaded."
 fi
+if [[ -z ${ATT_HOME:-} && -z ${RUNNER_TEMP:-} ]]; then
+  stop_early "Neither ATT_HOME nor RUNNER_TEMP is set, so there is no output directory (agent step: ${outcome:-not run}). See the job log."
+fi
+# shellcheck source-path=SCRIPTDIR source=env.sh
+. "$ATT_ACTION_PATH/scripts/env.sh"
 
 # If anything below fails unexpectedly, still report a status.
 trap 'set_output status failed' ERR
 
 out=$ATT_OUT
-work=${ATT_WORK:-${ATT_HOME:-$(dirname "$out")}/work}
+work=$ATT_WORK
 findings=$out/findings.json
 report=$out/report.md
-mkdir -p "$out"
+quarantine=$work/quarantine
+mkdir -p "$out" "$work"
+rm -rf "$quarantine"
 
 # --- 1. findings.json: present, valid, final status ---------------------------
 echo "::group::Finalize: findings.json"
 agent_note=''
-if [[ $outcome != success ]]; then
+summary_text="The triage agent did not produce a valid findings.json, so there are no results. See the errors below and the job log."
+if [[ $outcome == skipped && ! -s $work/versions.json ]]; then
+  agent_note="Setup did not complete: the install step failed, so the agent never started. See the job log."
+  summary_text="Setup failed before the triage agent started, so there are no results."
+elif [[ $outcome == skipped && ! -s $work/prompt.md ]]; then
+  agent_note="Setup did not complete: preflight (snouty doctor) or prompt rendering failed, so the agent never started. See the job log."
+  summary_text="Setup failed before the triage agent started, so there are no results."
+elif [[ $outcome != success ]]; then
   subtype=$(jq -r '.subtype // empty' "$work/agent-result.json" 2>/dev/null || true)
   agent_note="The agent step did not succeed (outcome: ${outcome:-unknown}${subtype:+, result: $subtype})."
 fi
 
 write_minimal() { # errors...
-  jq -n '{
-    schema_version: "0.1", status: "failed",
-    summary: "The triage agent did not produce a valid findings.json, so there are no results. See the errors below and the job log.",
+  jq -n --arg summary "$summary_text" '{
+    schema_version: "0.1", status: "failed", summary: $summary,
     selection: {applied: "", runs_considered: 0}, grouping: {applied: "", inferred: true},
     runs: [], skipped_runs: [], failures: [], known_issues_not_seen: [], ignored: [],
     not_investigated: [], run_health: [], errors: $ARGS.positional
@@ -57,8 +80,12 @@ write_minimal() { # errors...
 
 if [[ ! -s $findings ]]; then
   if [[ -e $findings ]]; then mv -f "$findings" "$out/findings.invalid.json"; fi
-  echo "::error::findings.json was not written by the agent."
-  write_minimal "findings.json was not written by the agent." ${agent_note:+"$agent_note"}
+  if [[ $outcome != skipped ]]; then echo "::error::findings.json was not written by the agent."; fi
+  if [[ $outcome == skipped && -n $agent_note ]]; then
+    write_minimal "$agent_note"
+  else
+    write_minimal "findings.json was not written by the agent." ${agent_note:+"$agent_note"}
+  fi
 elif ! violations=$("$here/validate-findings.sh" "$findings" "$schema"); then
   mv -f "$findings" "$out/findings.invalid.json"
   # Details go to the (redacted) report rather than the log: they quote values.
@@ -72,16 +99,17 @@ else
   current=$(jq -r .status "$findings")
   if [[ $current == in_progress ]]; then
     note=${agent_note:-"The agent finished without marking findings.json complete."}
-    jq --arg note "$note" '.status = "partial" | .errors += [$note]' "$findings" >"$findings.tmp"
-    mv -f "$findings.tmp" "$findings"
+    jq --arg note "$note" '.status = "partial" | .errors += [$note]' "$findings" >"$work/findings.tmp"
+    cat "$work/findings.tmp" >"$findings"
   elif [[ -n $agent_note ]]; then
-    jq --arg note "$agent_note" '.errors += [$note]' "$findings" >"$findings.tmp"
-    mv -f "$findings.tmp" "$findings"
+    jq --arg note "$agent_note" '.errors += [$note]' "$findings" >"$work/findings.tmp"
+    cat "$work/findings.tmp" >"$findings"
   fi
+  rm -f "$work/findings.tmp"
 fi
 
 # --- 2. validate the final file ----------------------------------------------
-if ! "$here/validate-findings.sh" "$findings" "$schema"; then
+if ! "$here/validate-findings.sh" "$findings" "$schema" >/dev/null; then
   echo "::error::internal: the final findings.json does not match the schema."
 fi
 status=$(jq -r '.status // "failed"' "$findings" 2>/dev/null || echo failed)
@@ -128,87 +156,127 @@ case $mode in
     ;;
 esac
 
-# --- 4. collect transcripts ---------------------------------------------------
+# Anything in the artifact must be a regular file (or a directory).
+drop_specials() { # dir
+  while IFS= read -r -d '' p; do
+    echo "::warning::Removing a non-regular file from the artifact: ${p#"$1"/}"
+    rm -f "$p"
+  done < <(find "$1" ! -type f ! -type d -print0)
+}
+
+# --- 4. collect transcripts: build and redact in ATT_WORK, then move ----------
 session_id=$(tr -d '[:space:]' 2>/dev/null <"$work/session-id" || true)
 if [[ ! $session_id =~ ^[A-Za-z0-9_-]+$ ]]; then session_id=''; fi
-tdir=$out/transcript
-rm -rf "$tdir"
+src=$work/transcript-src   # inputs to normalize, redacted first
+stage=$work/transcript     # becomes $out/transcript
+rm -rf "$src" "$stage" "$out/transcript"
 if [[ $transcripts == included ]]; then
-  mkdir -p "$tdir"
+  mkdir -p "$src" "$stage"
+  for f in stream.jsonl prompt.md inputs.json versions.json; do
+    if [[ -f $work/$f ]]; then cp "$work/$f" "$src/$f"; fi
+  done
   config_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
   session_log=''
   if [[ -n $session_id && -d $config_dir/projects ]]; then
     session_log=$(find "$config_dir/projects" -mindepth 2 -maxdepth 2 -type f -name "$session_id.jsonl" 2>/dev/null | head -n 1)
   fi
   if [[ -n $session_log ]]; then
-    cp "$session_log" "$tdir/claude-session.jsonl"
+    cp "$session_log" "$stage/claude-session.jsonl"
     # Newer Claude Code keeps large tool outputs/subagents next to the log.
-    if [[ -d ${session_log%.jsonl} ]]; then cp -R "${session_log%.jsonl}" "$tdir/claude-session"; fi
+    if [[ -d ${session_log%.jsonl} ]]; then cp -R "${session_log%.jsonl}" "$stage/claude-session"; fi
   else
     echo "::warning::Claude Code session log not found (session id: ${session_id:-unknown})."
   fi
-  if [[ -s $work/stream.jsonl ]]; then
-    if ! "$here/normalize-transcript.sh" "$work/stream.jsonl" "$tdir" \
-      --versions "$work/versions.json" --inputs "$work/inputs.json" \
-      --session-id "$session_id" --prompt "$work/prompt.md"; then
-      echo "::warning::Could not normalize the agent's stream output."
+  drop_specials "$stage"
+  # Redact the raw stream before normalizing, so previews can't cut a secret
+  # in half and hide it from the patterns.
+  if "$here/redact.sh" --quarantine "$quarantine/transcript-source" "$src"; then
+    if [[ -s $src/stream.jsonl ]]; then
+      if ! "$here/normalize-transcript.sh" "$src/stream.jsonl" "$stage" \
+        --versions "$src/versions.json" --inputs "$src/inputs.json" \
+        --session-id "$session_id" --prompt "$src/prompt.md"; then
+        echo "::warning::Could not normalize the agent's stream output."
+      fi
+    else
+      echo "::warning::No agent stream output (stream.jsonl) to normalize."
+    fi
+    if "$here/redact.sh" --quarantine "$quarantine/transcript" "$stage"; then
+      if [[ -n $(ls -A "$stage") ]]; then
+        mv "$stage" "$out/transcript"
+      else
+        transcripts=withheld
+        transcripts_reason="no session log or agent output was found."
+      fi
+    else
+      transcripts=withheld
+      transcripts_reason="redacting the transcripts failed."
     fi
   else
-    echo "::warning::No agent stream output (stream.jsonl) to normalize."
-  fi
-  if [[ -z $(ls -A "$tdir") ]]; then
-    rmdir "$tdir"
     transcripts=withheld
-    transcripts_reason="no session log or agent output was found."
+    transcripts_reason="redacting the transcripts failed."
   fi
+  rm -rf "$src" "$stage"
 fi
 echo "transcripts: $transcripts${transcripts_reason:+ ($transcripts_reason)}"
 echo "::endgroup::"
 
-# --- 5. redact ----------------------------------------------------------------
+# --- 5. commands.log, then redact everything in ATT_OUT ------------------------
 echo "::group::Finalize: redact"
-# The artifact holds regular files only.
-while IFS= read -r -d '' link; do
-  echo "::warning::Removing symlink from the artifact: ${link#"$out"/}"
-  rm -f "$link"
-done < <(find "$out" -type l -print0)
-if ! "$here/redact.sh" "$out"; then
-  # Never upload what could not be redacted: move it out of the artifact.
+# The shim's log lives outside ATT_OUT so the agent can't edit it; publish a copy.
+log_src=${ATT_COMMANDS_LOG:-}
+if [[ -z $log_src || ! $log_src -ef $out/commands.log ]]; then
+  rm -f "$out/commands.log"
+  if [[ -n $log_src && -f $log_src ]]; then cp "$log_src" "$out/commands.log"; fi
+fi
+drop_specials "$out"
+if ! "$here/redact.sh" --quarantine "$quarantine/out" "$out"; then
+  # Never publish what could not be redacted: move it out of the artifact.
   echo "::error::Redaction failed; removing the agent's files from the artifact."
-  quarantine=$work/unredacted-$(date +%s)
-  mkdir -p "$quarantine"
-  find "$out" -mindepth 1 -maxdepth 1 -exec mv -t "$quarantine" {} +
+  mkdir -p "$quarantine/unredacted"
+  find "$out" -mindepth 1 -maxdepth 1 -exec mv -t "$quarantine/unredacted" {} +
   write_minimal "Redaction of the output failed, so the agent's files were removed from the artifact." ${agent_note:+"$agent_note"}
   status=failed
   transcripts=withheld
   transcripts_reason="redaction failed."
 fi
+# One list of withheld files, with paths as they would have appeared in the artifact.
+withheld=$work/withheld.tsv
+{
+  sed 's|^|transcript-source/|' "$quarantine/transcript-source/quarantined.tsv" 2>/dev/null || true
+  sed 's|^|transcript/|' "$quarantine/transcript/quarantined.tsv" 2>/dev/null || true
+  cat "$quarantine/out/quarantined.tsv" 2>/dev/null || true
+} >"$withheld"
 echo "::endgroup::"
 
 # --- 6. report.md ---------------------------------------------------------------
 echo "::group::Finalize: report"
 if ! "$here/render-report.sh" --findings "$findings" --out "$report" \
-  --commands-log "${ATT_COMMANDS_LOG:-$out/commands.log}" \
+  --commands-log "$out/commands.log" \
   --versions "$work/versions.json" --inputs "$work/inputs.json" \
   --agent-result "$work/agent-result.json" --artifact-dir "$out" \
   --session-id "$session_id" --transcripts "$transcripts" \
-  --transcripts-reason "$transcripts_reason"; then
+  --transcripts-reason "$transcripts_reason" --quarantined "$withheld"; then
   echo "::error::Rendering report.md failed; writing a minimal report."
   printf '# Antithesis triage report\n\n**Status:** %s\n\nThe report could not be rendered. See findings.json in the artifact and the job log.\n' \
     "$status" >"$report"
 fi
-# The report also embeds inputs/versions from outside the artifact dir.
-"$here/redact.sh" "$report" || {
-  echo "::error::Redacting report.md failed."
-  printf '# Antithesis triage report\n\n**Status:** %s\n\nThe report was withheld because redaction failed.\n' "$status" >"$report"
-}
 echo "::endgroup::"
 
-# --- 7. job summary -----------------------------------------------------------
-artifact_note="the artifact"
-if [[ -n ${GITHUB_RUN_NUMBER:-} ]]; then
-  artifact_note="the artifact \`antithesis-triage-$GITHUB_RUN_NUMBER-${GITHUB_RUN_ATTEMPT:-1}\`"
+# --- 7. final redaction pass over ATT_OUT ----------------------------------------
+# Covers report.md, which embeds inputs/versions from outside ATT_OUT.
+redacted=false
+if "$here/redact.sh" --quarantine "$quarantine/final" "$out"; then
+  redacted=true
+else
+  echo "::error::The final redaction pass failed; the artifact will not be uploaded."
 fi
+if [[ ! -f $report ]]; then
+  printf '# Antithesis triage report\n\n**Status:** %s\n\nThe report was withheld because it could not be redacted.\n' "$status" >"$report"
+fi
+
+# --- 8. job summary -----------------------------------------------------------
+artifact_note="the artifact"
+if [[ -n ${ATT_ARTIFACT_NAME:-} ]]; then artifact_note="the artifact \`$ATT_ARTIFACT_NAME\`"; fi
 if [[ -n ${GITHUB_SERVER_URL:-} && -n ${GITHUB_REPOSITORY:-} && -n ${GITHUB_RUN_ID:-} ]]; then
   artifact_note+=" on the [workflow run page](${GITHUB_SERVER_URL%/}/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
 fi
@@ -231,7 +299,9 @@ close_blocks='
     + ([range(0; [$st.details, 0] | max)] | map("\n</details>\n") | join(""))
 '
 write_summary() {
-  if [[ $(wc -c <"$report") -le $summary_limit ]]; then
+  if [[ $redacted != true ]]; then
+    printf '# Antithesis triage report\n\n**Status:** %s\n\nThe report and artifact were withheld because redaction failed. See the job log.\n' "$status" | append_summary
+  elif [[ $(wc -c <"$report") -le $summary_limit ]]; then
     append_summary <"$report"
   else
     {
@@ -245,13 +315,15 @@ if ! write_summary; then
   echo "::warning::Could not write the job summary."
 fi
 
-# --- 8. outputs -----------------------------------------------------------------
+# --- 9. outputs -----------------------------------------------------------------
 set_output status "$status"
 set_output report-path "$report"
 set_output findings-path "$findings"
+set_output redacted "$redacted"
 
-# --- 9. exit code ---------------------------------------------------------------
+# --- 10. exit code --------------------------------------------------------------
 code=$(exit_code_for "$status")
+if [[ $redacted != true ]]; then code=1; fi
 if [[ $code != 0 ]]; then
   echo "::error::Antithesis triage finished with status '$status' (agent step: ${outcome:-unknown})."
 else
