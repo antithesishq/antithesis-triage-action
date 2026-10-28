@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/antithesishq/antithesis-triage-action/schema/findings.schema.json",
+  "title": "Antithesis triage findings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "summary", "selection", "grouping", "runs", "skipped_runs", "failures", "known_issues_not_seen", "ignored", "not_investigated", "run_health", "errors"],
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "status": { "enum": ["in_progress", "complete", "partial", "failed"], "description": "in_progress while the agent is still writing; complete/partial/failed at the end." },
+    "summary": { "type": "string", "description": "Executive summary in markdown, a few sentences." },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applied", "runs_considered"],
+      "properties": {
+        "applied": { "type": "string", "description": "How the agent interpreted the selection inputs, including snouty filters used." },
+        "runs_considered": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "grouping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applied", "inferred"],
+      "properties": {
+        "applied": { "type": "string", "description": "Which runs were treated as comparable, and why." },
+        "inferred": { "type": "boolean", "description": "true if no grouping input was given and the agent chose one." }
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "created_at", "group", "status", "commit", "triage_report_url", "properties_failed", "properties_passed", "instrumentation", "notes"],
+        "properties": {
+          "run_id": { "type": "string" },
+          "created_at": { "type": "string" },
+          "group": { "type": "string" },
+          "status": { "type": "string", "description": "snouty run status, e.g. completed, incomplete." },
+          "commit": { "type": ["string", "null"], "description": "vcs.version_id or other commit the run tested." },
+          "triage_report_url": { "type": ["string", "null"], "description": "links.triage_report with the ?auth= query removed." },
+          "properties_failed": { "type": "integer", "minimum": 0 },
+          "properties_passed": { "type": "integer", "minimum": 0 },
+          "instrumentation": { "enum": ["ok", "missing", "unknown"] },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "skipped_runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "reason"],
+        "properties": { "run_id": { "type": "string" }, "reason": { "type": "string" } }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["property", "run_group", "classification", "failing_runs", "baseline_runs", "rate", "known_issue", "evidence", "root_cause", "confidence", "category", "source_refs", "suggested_fix", "patch_file", "recommended_debug_session", "reproduce_commands"],
+        "properties": {
+          "property": { "type": "string", "description": "Property name (the failure identity)." },
+          "run_group": { "type": "string" },
+          "classification": { "enum": ["new", "ongoing", "known_issue", "unclear"] },
+          "failing_runs": { "type": "array", "items": { "type": "string" } },
+          "baseline_runs": { "type": "array", "items": { "type": "string" }, "description": "Earlier runs in the same group compared against to decide new vs ongoing." },
+          "rate": { "type": "string", "description": "e.g. 'failed in 3/5 runs'." },
+          "known_issue": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["entry", "status", "reason"],
+            "properties": {
+              "entry": { "type": "string", "description": "The known-issues input line that matched." },
+              "status": { "enum": ["still_matching", "diverged"] },
+              "reason": { "type": "string", "description": "Why it matched, and how it diverged if it did." }
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["run_id", "input_hash", "vtime", "container", "excerpt"],
+              "properties": {
+                "run_id": { "type": "string" },
+                "input_hash": { "type": ["string", "null"] },
+                "vtime": { "type": ["string", "null"] },
+                "container": { "type": ["string", "null"] },
+                "excerpt": { "type": "string", "description": "Short log excerpt, at most ~20 lines." }
+              }
+            }
+          },
+          "root_cause": { "type": "string", "description": "Root-cause hypothesis in markdown." },
+          "confidence": { "enum": ["high", "medium", "low"] },
+          "category": { "enum": ["sut_bug", "workload_bug", "setup", "infra", "unknown"] },
+          "source_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "line", "commit", "note"],
+              "properties": {
+                "path": { "type": "string", "description": "Repo-relative path." },
+                "line": { "type": ["integer", "null"] },
+                "commit": { "type": ["string", "null"] },
+                "note": { "type": "string" }
+              }
+            }
+          },
+          "suggested_fix": { "type": "string", "description": "Markdown; may include a diff block." },
+          "patch_file": { "type": ["string", "null"], "description": "Path relative to the output dir, e.g. patches/balance.patch." },
+          "recommended_debug_session": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["run_id", "input_hash", "vtime", "reason", "inspect"],
+            "properties": {
+              "run_id": { "type": "string" },
+              "input_hash": { "type": "string" },
+              "vtime": { "type": "string" },
+              "reason": { "type": "string", "description": "Why this moment." },
+              "inspect": { "type": "string", "description": "What to look at in the session." }
+            }
+          },
+          "reproduce_commands": { "type": "array", "items": { "type": "string" }, "description": "snouty commands a human can paste to see the evidence." }
+        }
+      }
+    },
+    "known_issues_not_seen": { "type": "array", "items": { "type": "string" }, "description": "known-issues entries that did not occur in the selected runs." },
+    "ignored": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entry", "count"],
+        "properties": { "entry": { "type": "string" }, "count": { "type": "integer", "minimum": 0 } }
+      }
+    },
+    "not_investigated": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["property", "reason"],
+        "properties": { "property": { "type": "string" }, "reason": { "type": "string" } }
+      }
+    },
+    "run_health": { "type": "array", "items": { "type": "string" }, "description": "Incomplete runs, instrumentation warnings, unreached properties." },
+    "errors": { "type": "array", "items": { "type": "string" }, "description": "Anything that blocked the agent (it cannot ask questions)." }
+  }
+}

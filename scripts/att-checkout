@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# att-checkout <40-hex-commit-sha> [patch-<name>]
+#
+# The triage agent's only way to check out a commit: a detached git worktree at
+# $ATT_HOME/worktrees/<name>, where <name> is the given patch-<name> or the
+# first 12 characters of the SHA. If the commit is missing locally it is
+# fetched from origin first. The agent cannot pass git options, refs or target
+# paths, so it cannot check repository content out over git config or hooks.
+# Running it again for the same target and commit is a no-op.
+set -euo pipefail
+
+usage() { echo "usage: att-checkout <40-hex-commit-sha> [patch-<name>]" >&2; exit 2; }
+[[ $# -ge 1 && $# -le 2 ]] || usage
+sha=$1
+name=${2:-}
+if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "att-checkout: the commit must be a full 40-character lowercase hex SHA (resolve a short one with: git rev-parse --verify <short>^{commit})" >&2
+  exit 2
+fi
+if [[ -z "$name" ]]; then
+  name=${sha:0:12}
+elif ! [[ "$name" =~ ^patch-[a-z0-9][a-z0-9-]{0,40}$ ]]; then
+  echo "att-checkout: the name must look like patch-<slug> (lowercase letters, digits, dashes; at most 46 characters)" >&2
+  exit 2
+fi
+
+: "${ATT_HOME:?ATT_HOME is not set}"
+repo="${GITHUB_WORKSPACE:-$PWD}"
+mkdir -p "$ATT_HOME/worktrees"
+target="$(cd "$ATT_HOME/worktrees" && pwd -P)/$name"
+
+# Ignore global/system git config and repository hooks for everything we run.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+g() { git -C "$repo" -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+
+if [[ -e "$target" ]]; then
+  head=$(git -C "$target" -c core.fsmonitor=false rev-parse HEAD 2>/dev/null || true)
+  if [[ "$head" == "$sha" ]]; then
+    echo "$sha is already checked out at $target"
+    exit 0
+  fi
+  echo "att-checkout: $target already exists at another commit (${head:-unknown}); use a different patch-<name>" >&2
+  exit 1
+fi
+
+if ! g cat-file -e "$sha^{commit}" 2>/dev/null; then
+  echo "Commit $sha is not in the checkout; fetching it from origin." >&2
+  if ! g fetch --no-tags --no-recurse-submodules origin "$sha" >&2; then
+    echo "att-checkout: could not fetch $sha from origin" >&2
+    exit 1
+  fi
+  g cat-file -e "$sha^{commit}" 2>/dev/null || { echo "att-checkout: origin did not provide commit $sha" >&2; exit 1; }
+fi
+
+g worktree add --detach "$target" "$sha" >&2
+echo "Checked out $sha at $target"

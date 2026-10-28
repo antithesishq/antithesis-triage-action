@@ -1,0 +1,46 @@
+{
+  "schema_version": "0.2",
+  "status": "done",
+  "summary": "Partially written.",
+  "selection": { "applied": "last 7 days", "runs_considered": -1 },
+  "grouping": { "applied": "one group", "inferred": "yes" },
+  "runs": [
+    {
+      "run_id": "r-1",
+      "created_at": "2026-10-27T03:00:12Z",
+      "group": "main",
+      "status": "completed",
+      "commit": 12345,
+      "triage_report_url": null,
+      "properties_failed": 1.5,
+      "properties_passed": 3,
+      "instrumentation": "fine",
+      "notes": "",
+      "extra": true
+    }
+  ],
+  "skipped_runs": [],
+  "failures": [
+    {
+      "property": "P",
+      "run_group": "main",
+      "classification": "new",
+      "failing_runs": ["r-1"],
+      "baseline_runs": [],
+      "rate": "1/1",
+      "known_issue": { "entry": "x", "status": "maybe" },
+      "evidence": [],
+      "root_cause": "",
+      "confidence": "very high",
+      "category": "sut_bug",
+      "source_refs": [ { "path": "a.go", "line": "12", "commit": null, "note": "" } ],
+      "suggested_fix": "",
+      "patch_file": null,
+      "recommended_debug_session": null
+    }
+  ],
+  "known_issues_not_seen": [],
+  "ignored": [],
+  "not_investigated": [],
+  "run_health": []
+}
