@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Fake curl for test/test-e2e.sh, on PATH for the install step only. Serves
+# https://HOST/PATH from $FAKE_DOWNLOADS/HOST/PATH (404 otherwise) and appends
+# every requested URL to $FAKE_DIR/curl.log.
+set -euo pipefail
+
+out='' url=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o|--output) out=$2; shift ;;
+    -H|--header|--proto|--retry|--retry-delay|--connect-timeout|--max-time) shift ;;
+    -*) ;;
+    *) url=$1 ;;
+  esac
+  shift
+done
+
+printf '%s\n' "$url" >> "${FAKE_DIR:?}/curl.log"
+case $url in
+  https://*) ;;
+  *) echo "curl: (1) Protocol not allowed: $url" >&2; exit 1 ;;
+esac
+src=${FAKE_DOWNLOADS:?}/${url#https://}
+case $src in *..*) echo "curl: (3) bad URL" >&2; exit 3 ;; esac
+if [ ! -f "$src" ]; then
+  echo "curl: (22) The requested URL returned error: 404" >&2
+  exit 22
+fi
+if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi

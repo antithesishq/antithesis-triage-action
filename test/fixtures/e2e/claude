@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+# Fake Claude Code CLI for test/test-e2e.sh. The test serves it as the Claude
+# Code release binary, so install.sh installs it as $ATT_HOME/bin/claude.
+#
+# It behaves like `claude -p --output-format stream-json --verbose` in the ways
+# the action depends on:
+#   - reads the prompt on stdin and takes every path and command it uses from
+#     the prompt, as the model would (findings path, validator, checkout
+#     helper, worktrees, workspace);
+#   - prints stream-json lines: system/init, assistant tool_use, user
+#     tool_result and a final result line;
+#   - writes the session log to $CLAUDE_CONFIG_DIR/projects/<cwd>/<id>.jsonl
+#     (plus a persisted tool output under <id>/tool-results/);
+#   - runs its tool calls for real: Bash through `bash -c` in its working
+#     directory (so `snouty` resolves to the shim on PATH), Edit and Read as
+#     file operations, each checked against the permission rules on its
+#     command line.
+# Anything a real session would trip over (a path the prompt names that no
+# Edit rule allows, a validator command that isn't allowlisted, a failing
+# validation, ...) is appended to $FAKE_DIR/agent-problems.
+#
+# FAKE_CLAUDE_MODE: success (default), or max_turns (stops with
+# error_max_turns after writing an in_progress findings.json).
+# shellcheck disable=SC2016 # jq programs and sed patterns with literal backticks
+set -euo pipefail
+
+version=2.1.313
+if [ "${1:-}" = --version ]; then
+  echo "$version (Claude Code)"
+  exit 0
+fi
+
+: "${FAKE_DIR:?FAKE_DIR is not set}"
+die() { echo "Error: $*" >&2; exit 1; }
+problem() { printf '%s\n' "$*" >> "$FAKE_DIR/agent-problems"; }
+printf '%s\n' "$@" > "$FAKE_DIR/claude-args"
+
+# --- command line ------------------------------------------------------------
+print=0 verbose=0 format=text sid='' model='' max_turns=''
+plugin_dirs=() add_dirs=() allowed=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    -p|--print) print=1 ;;
+    --verbose) verbose=1 ;;
+    --bare) ;;
+    --output-format) format=$2; shift ;;
+    --session-id) sid=$2; shift ;;
+    --model) model=$2; shift ;;
+    --max-turns) max_turns=$2; shift ;;
+    --plugin-dir) plugin_dirs+=("$2"); shift ;;
+    --max-budget-usd|--permission-mode|--permission-prompts|--setting-sources|--settings|--tools|--append-system-prompt)
+      shift ;;
+    --allowedTools|--disallowedTools|--add-dir) # variadic
+      opt=$1
+      while [ $# -gt 1 ] && [[ $2 != -* ]]; do
+        case $opt in
+          --add-dir) add_dirs+=("$2") ;;
+          --allowedTools) allowed+=("$2") ;;
+        esac
+        shift
+      done
+      ;;
+    *) die "unknown option '$1'" ;;
+  esac
+  shift
+done
+[ "$print" = 1 ] || die "this fake only supports --print"
+[ "$format" = stream-json ] || die "this fake only supports --output-format stream-json"
+[ "$verbose" = 1 ] || die "When using --print, --output-format=stream-json requires --verbose"
+[[ $sid =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
+  die "Invalid session ID. Must be a valid UUID."
+model=${model:-claude-default}
+
+prompt=$FAKE_DIR/claude-stdin
+cat > "$prompt"
+[ -s "$prompt" ] || die "Input must be provided either through stdin or as a prompt argument when using --print"
+
+# --- what the prompt tells the agent --------------------------------------------
+from_prompt() { sed -n "$1" "$prompt" | head -n 1; }
+out=$(from_prompt 's/^Your deliverable is \*\*`\(.*\)\/findings\.json`\*\*.*$/\1/p')
+validator=$(from_prompt 's/^- the findings validator, exactly as written: `\(.*\)`$/\1/p')
+checkout=$(from_prompt 's/^- the checkout helper: `\(.*\) <40-hex-sha> .*$/\1/p')
+worktrees=$(from_prompt 's/^- Git worktrees .*: `\([^`]*\)`$/\1/p')
+scratch=$(from_prompt 's/^- Scratch directory[^`]*: `\(.*\)`$/\1/p')
+workspace=$(from_prompt 's/^.* checked out with full history at `\([^`]*\)` (your working directory).*$/\1/p')
+default_branch=$(from_prompt 's/^.*, default branch `\([^`]*\)`\.$/\1/p')
+for v in out validator checkout worktrees scratch workspace default_branch; do
+  [ -n "${!v}" ] || { problem "the prompt does not give the $v"; die "fake agent: no $v in the prompt"; }
+done
+
+# --- permission rules, as Claude Code matches them --------------------------------
+bash_allowed() { # command
+  local r p
+  for r in "${allowed[@]}"; do
+    [[ $r == 'Bash('*')' ]] || continue
+    p=${r#Bash(}; p=${p%)}
+    if [[ $p == *' *' ]]; then
+      [[ $1 == "${p% \*}"\ * ]] && return 0
+    else
+      [[ $1 == "$p" ]] && return 0
+    fi
+  done
+  return 1
+}
+edit_allowed() { # absolute path; rules are Edit(//abs/path) or Edit(//abs/dir/**)
+  local r p
+  for r in "${allowed[@]}"; do
+    [[ $r == 'Edit(//'*')' ]] || continue
+    p=${r#Edit(/}; p=${p%)}
+    if [[ $p == */'**' ]]; then
+      [[ $1 == "${p%/\*\*}"/* ]] && return 0
+    else
+      [[ $1 == "$p" ]] && return 0
+    fi
+  done
+  return 1
+}
+in_add_dirs() { local d; for d in "${add_dirs[@]}"; do [ "$d" = "$1" ] && return 0; done; return 1; }
+
+edit_allowed "$out/findings.json" || problem "no Edit rule allows the prompt's findings path $out/findings.json"
+edit_allowed "$out/patches/x.patch" || problem "no Edit rule allows the prompt's patches dir $out/patches/"
+bash_allowed "$validator" || problem "the prompt's validator command is not allowlisted: $validator"
+bash_allowed "$checkout 0000000000000000000000000000000000000000" ||
+  problem "the prompt's checkout helper is not allowlisted: $checkout"
+for d in "$out" "$scratch" "$worktrees"; do
+  in_add_dirs "$d" || problem "--add-dir does not include $d, which the prompt tells the agent to use"
+done
+cwd=$(pwd -P)
+[ "$cwd" = "$(cd "$workspace" && pwd -P)" ] || problem "working directory $cwd is not the prompt's workspace $workspace"
+
+# --- plugin -----------------------------------------------------------------------
+plugin=${plugin_dirs[0]:-}
+plugins='[]' plugin_errors='[]' skills='[]'
+if [ -n "$plugin" ] && name=$(jq -er '.name' "$plugin/.claude-plugin/plugin.json" 2>/dev/null); then
+  plugins=$(jq -cn --arg n "$name" --arg p "$plugin" '[{name: $n, path: $p}]')
+  if [ -f "$plugin/skills/antithesis-triage/SKILL.md" ]; then
+    skills=$(jq -cn --arg n "$name" '["\($n):antithesis-triage"]')
+  fi
+else
+  plugin_errors=$(jq -cn --arg p "$plugin" '[{plugin: $p, error: "plugin.json not found"}]')
+fi
+
+# --- session log and stream ---------------------------------------------------------
+config=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+project=$config/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')
+mkdir -p "$project"
+session_log=$project/$sid.jsonl
+uuid() { cat /proc/sys/kernel/random/uuid; }
+parent=null
+
+session_line() { # stream-json user/assistant line -> session log format
+  jq -c --arg sid "$sid" --arg cwd "$cwd" --arg v "$version" --argjson parent "$parent" \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+    '{parentUuid: $parent, isSidechain: false, userType: "external", cwd: $cwd, sessionId: $sid,
+      version: $v, type, message, uuid, timestamp: $ts}
+     + (if .tool_use_result then {toolUseResult: .tool_use_result} else {} end)' <<<"$1" >> "$session_log"
+  parent=$(jq -c '.uuid' <<<"$1")
+}
+emit() { # one stream-json line
+  printf '%s\n' "$1"
+  case $(jq -r '.type' <<<"$1") in user|assistant) session_line "$1" ;; esac
+}
+
+turns=0
+assistant() { # content-json [stop_reason]
+  turns=$((turns + 1))
+  emit "$(jq -nc --argjson c "$1" --arg model "$model" --arg sid "$sid" --arg u "$(uuid)" \
+    --arg mid "msg_e2e_$turns" --arg stop "${2:-tool_use}" \
+    '{type: "assistant", message: {id: $mid, type: "message", role: "assistant", model: $model,
+      content: $c, stop_reason: $stop, usage: {input_tokens: 100, output_tokens: 20}},
+      parent_tool_use_id: null, session_id: $sid, uuid: $u}')"
+}
+tool_result() { # id content is_error
+  emit "$(jq -nc --arg id "$1" --arg c "$2" --argjson err "$3" --arg sid "$sid" --arg u "$(uuid)" \
+    '{type: "user", message: {role: "user", content: [{tool_use_id: $id, type: "tool_result", content: $c, is_error: $err}]},
+      parent_tool_use_id: null, session_id: $sid, uuid: $u,
+      tool_use_result: {stdout: $c, stderr: "", interrupted: false}}')"
+}
+say() { assistant "$(jq -nc --arg t "$1" '[{type: "text", text: $t}]')" end_turn; }
+
+n=0 last_rc=0 last_out=''
+bash_tool() { # [--unchecked] [--persist] command
+  local check=1 persist=0 id content
+  while :; do
+    case $1 in
+      --unchecked) check=0; shift ;;
+      --persist) persist=1; shift ;;
+      *) break ;;
+    esac
+  done
+  n=$((n + 1)); id=toolu_e2e_$n
+  if [ "$check" = 1 ] && ! bash_allowed "$1"; then problem "Bash command matches no allow rule: $1"; fi
+  assistant "$(jq -nc --arg id "$id" --arg cmd "$1" '[{type: "tool_use", id: $id, name: "Bash", input: {command: $cmd}}]')"
+  last_rc=0
+  last_out=$(bash -c "$1" 2>&1 < /dev/null) || last_rc=$?
+  content=$last_out
+  if [ "$persist" = 1 ]; then
+    mkdir -p "$project/$sid/tool-results"
+    printf '%s\n' "$last_out" > "$project/$sid/tool-results/$id.txt"
+    content="Output saved to $project/$sid/tool-results/$id.txt. Preview: $last_out"
+  fi
+  if [ "$last_rc" = 0 ]; then
+    tool_result "$id" "$content" false
+  else
+    tool_result "$id" "Exit code $last_rc"$'\n'"$content" true
+  fi
+}
+edit_tool() { # path new-content
+  local id old=''
+  n=$((n + 1)); id=toolu_e2e_$n
+  edit_allowed "$1" || problem "Edit of $1 matches no allow rule"
+  if [ -f "$1" ]; then old=$(cat "$1"); fi
+  assistant "$(jq -nc --arg id "$id" --arg p "$1" --arg old "$old" --arg new "$2" \
+    '[{type: "tool_use", id: $id, name: "Edit", input: {file_path: $p, old_string: $old, new_string: $new}}]')"
+  printf '%s\n' "$2" > "$1"
+  tool_result "$id" "The file $1 has been updated successfully." false
+}
+read_tool() { # path
+  local id
+  n=$((n + 1)); id=toolu_e2e_$n
+  assistant "$(jq -nc --arg id "$id" --arg p "$1" '[{type: "tool_use", id: $id, name: "Read", input: {file_path: $p}}]')"
+  last_out=$(cat "$1")
+  tool_result "$id" "$(cat -n "$1")" false
+}
+result() { # subtype is_error [error]
+  jq -nc --arg st "$1" --argjson err "$2" --arg e "${3-}" --argjson turns "$turns" --arg sid "$sid" --arg u "$(uuid)" \
+    '{type: "result", subtype: $st, is_error: $err, duration_ms: 64000, duration_api_ms: 52000,
+      num_turns: $turns, stop_reason: (if $err then "tool_use" else "end_turn" end), session_id: $sid,
+      total_cost_usd: 0.4242, usage: {input_tokens: 4000, output_tokens: 900}, permission_denials: [], uuid: $u}
+     + (if $e == "" then {result: "Triage finished; findings.json is complete."} else {errors: [$e]} end)'
+}
+
+# --- the session ------------------------------------------------------------------
+# The prompt is the session log's first entry (stream-json doesn't echo it).
+session_line "$(jq -c -Rs --arg u "$(uuid)" '{type: "user", message: {role: "user", content: .}, uuid: $u}' "$prompt")"
+emit "$(jq -nc --arg cwd "$cwd" --arg sid "$sid" --arg model "$model" --arg v "$version" \
+  --argjson plugins "$plugins" --argjson errors "$plugin_errors" --argjson skills "$skills" \
+  '{type: "system", subtype: "init", cwd: $cwd, session_id: $sid, tools: ["Bash", "Read", "Edit"],
+    mcp_servers: [], model: $model, permissionMode: "dontAsk", apiKeySource: "ANTHROPIC_API_KEY",
+    claude_code_version: $v, skills: $skills, plugins: $plugins}
+   + (if ($errors | length) > 0 then {plugin_errors: $errors} else {} end)')"
+
+say "Triaging recent runs; the default branch is \`$default_branch\`."
+
+# Selection.
+bash_tool "snouty runs --json list -n 200"
+run_id=$(jq -r '.[0].run_id // empty' <<<"$last_out" 2>/dev/null || true)
+created=$(jq -r '.[0].created_at // empty' <<<"$last_out" 2>/dev/null || true)
+commit=$(jq -r '.[0].parameters["vcs.version_id"] // empty' <<<"$last_out" 2>/dev/null || true)
+report_url=$(jq -r '.[0].links.triage_report // empty' <<<"$last_out" 2>/dev/null || true)
+if [ -z "$run_id" ] || [ -z "$commit" ]; then problem "snouty runs list gave no usable run: $last_out"; fi
+input_hash=-1520695250096255483 vtime=67.7622960046865
+excerpt='' line_no=null
+
+# findings_json <status>: the agent's findings.json. Model output is not
+# trustworthy: it echoes the API key into run_health and keeps a signed
+# ?auth= link, both of which finalize must redact.
+findings_json() {
+  jq -n --arg status "$1" --arg run "$run_id" --arg created "$created" --arg commit "$commit" \
+    --arg report "$report_url?auth=SECRET-e2e-signature" --arg key "${ANTITHESIS_API_KEY-}" \
+    --arg branch "$default_branch" --arg excerpt "$excerpt" --arg hash "$input_hash" --arg vtime "$vtime" \
+    --argjson line "$line_no" '
+    {schema_version: "0.1", status: $status,
+     summary: (if $status == "in_progress" then "Triage in progress. Report: \($report)"
+               else "Triaged 1 run of `nightly` on `\($branch)`. One **new** failure, `Balance stays nonnegative`: `transfer` no longer holds `accounts_lock`. Triage report: \($report)" end),
+     selection: {applied: "snouty runs --json list -n 200, keeping completed runs of nightly on \($branch).", runs_considered: 1},
+     grouping: {applied: "One group: antithesis.source=\($branch), test_name=nightly.", inferred: true},
+     runs: [{run_id: $run, created_at: $created, group: "\($branch)/nightly", status: "completed", commit: $commit,
+             triage_report_url: $report, properties_failed: 1, properties_passed: 12, instrumentation: "ok", notes: ""}],
+     skipped_runs: [], failures: [], known_issues_not_seen: [], ignored: [], not_investigated: [],
+     run_health: ["snouty authenticated with API key \($key)."], errors: []}
+    | if $status == "in_progress" then . else .failures = [{
+        property: "Balance stays nonnegative", run_group: "\($branch)/nightly", classification: "new",
+        failing_runs: [$run], baseline_runs: [], rate: "failed in 1/1 runs", known_issue: null,
+        evidence: [{run_id: $run, input_hash: $hash, vtime: $vtime, container: "bank", excerpt: $excerpt}],
+        root_cause: "Two concurrent `transfer` calls both pass the balance check because `transfer` no longer takes `accounts_lock` before it.",
+        confidence: "high", category: "sut_bug",
+        source_refs: [{path: "src/ledger.rs", line: $line, commit: $commit, note: "check-then-act on the balance"}],
+        suggested_fix: "Hold `accounts_lock` across the check and the update (see the patch).",
+        patch_file: "patches/balance-lock.patch",
+        recommended_debug_session: {run_id: $run, input_hash: $hash, vtime: $vtime,
+          reason: "Just before the second transfer commits.", inspect: "Thread stacks of the bank process."},
+        reproduce_commands: ["snouty runs --json logs \($run) \($hash) \($vtime)"]}] end'
+}
+
+edit_tool "$out/findings.json" "$(findings_json in_progress)"
+bash_tool "$validator"
+[ "$last_rc" = 0 ] || problem "the validator rejected the in_progress findings.json: $last_out"
+
+if [ "${FAKE_CLAUDE_MODE:-success}" = max_turns ]; then
+  result error_max_turns true "Reached maximum number of turns (${max_turns:-?})"
+  exit 1
+fi
+
+# Evidence.
+bash_tool "snouty runs --json logs $run_id $input_hash $vtime"
+[ "$last_rc" = 0 ] || problem "snouty runs logs failed: $last_out"
+excerpt=$(jq -r '.output_text' <<<"$last_out" 2>/dev/null | head -n 3 || true)
+# A documented residual gap: jq can print the agent's environment.
+bash_tool --persist "jq -n -r env.ANTITHESIS_API_KEY"
+# The shim must refuse this.
+bash_tool "snouty launch --duration 30 --description e2e"
+[ "$last_rc" = 126 ] || problem "snouty launch was not refused by the shim (exit $last_rc)"
+
+# Source at the tested commit, and a patch.
+bash_tool "$checkout $commit"
+[ "$last_rc" = 0 ] || problem "the checkout helper failed: $last_out"
+read_tool "$worktrees/${commit:0:12}/src/ledger.rs"
+line_no=$(grep -n 'if from.balance' <<<"$last_out" | cut -d: -f1 || true)
+line_no=${line_no:-null}
+bash_tool "$checkout $commit patch-balance-lock"
+[ "$last_rc" = 0 ] || problem "the checkout helper failed for the patch worktree: $last_out"
+src=$worktrees/patch-balance-lock/src/ledger.rs
+if [ -f "$src" ]; then
+  original=$(cat "$src")
+  edit_tool "$src" "${original/        if from.balance/        let _guard = self.accounts_lock.lock();
+        if from.balance}"
+else
+  problem "no patch worktree at $worktrees/patch-balance-lock"
+fi
+# The prompt's patch recipe (diff exits 1 when there are differences).
+bash_tool --unchecked "git show $commit:src/ledger.rs | diff -u --label a/src/ledger.rs --label b/src/ledger.rs - $src > $out/patches/balance-lock.patch"
+[ -s "$out/patches/balance-lock.patch" ] || problem "the patch recipe wrote no patch: $last_out"
+
+say "The run's triage report is $report_url?auth=SECRET-e2e-signature."
+edit_tool "$out/findings.json" "$(findings_json complete)"
+bash_tool "$validator"
+[ "$last_rc" = 0 ] || problem "the validator rejected the final findings.json: $last_out"
+
+result success false

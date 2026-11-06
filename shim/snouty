@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# snouty shim for antithesis-triage-action (see plans/contract.md, "Shim
+# contract"). Sits ahead of the real binary on PATH and:
+#   - allows only read-only commands; everything else exits 126,
+#   - appends one JSON line per call to $ATT_COMMANDS_LOG (run-agent.sh shows
+#     progress in the Actions log; stderr here goes to the agent),
+#   - strips signed ?auth= query strings from stdout and stderr, streaming.
+# It is a guardrail, not a security boundary: the API key is in the
+# environment.
+set -euo pipefail
+
+# The real binary lives next to the shim ($ATT_HOME/libexec/snouty). Prefer
+# that path so an `ATT_SNOUTY_REAL=... snouty` prefix can't swap in another
+# program; fall back to $ATT_SNOUTY_REAL outside the standard layout.
+self_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+real="$self_dir/../libexec/snouty"
+[ -x "$real" ] || real="${ATT_SNOUTY_REAL:-}"
+
+args=("$@")
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+start_ms=$(date +%s%3N)
+display="snouty"
+if [ $# -gt 0 ]; then
+  printf -v quoted '%q ' "$@"
+  display+=" ${quoted% }"
+fi
+
+log_call() { # exit_code duration_ms denied
+  [ -n "${ATT_COMMANDS_LOG:-}" ] || return 0
+  # NUL-separated so any argument (spaces, newlines, leading dashes) survives.
+  # argv holds the arguments after `snouty`, as in test/fixtures/commands.log.
+  if [ ${#args[@]} -gt 0 ]; then printf '%s\0' "${args[@]}"; fi |
+    jq -cRs --arg ts "$ts" --argjson exit "$1" --argjson ms "$2" --argjson denied "$3" \
+      '{ts: $ts, argv: (if . == "" then [] else split("\u0000")[:-1] end),
+        exit: $exit, duration_ms: $ms, denied: $denied}' \
+      >> "$ATT_COMMANDS_LOG" 2>/dev/null || true
+}
+
+finish() { # exit_code denied
+  local ms=$(( $(date +%s%3N) - start_ms ))
+  log_call "$1" "$ms" "$2"
+  exit "$1"
+}
+
+# A call cut short by `timeout` or the Bash tool's time limit still gets its log
+# line (exit 128+n). The signal is passed on to the real snouty as TERM, since
+# a background child of a non-interactive shell ignores INT.
+child=""
+# shellcheck disable=SC2317 # called from the traps below
+on_signal() { # signal_number
+  trap '' INT TERM HUP
+  local code=$((128 + $1))
+  log_call "$code" "$(( $(date +%s%3N) - start_ms ))" false
+  if [ -n "$child" ]; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+  fi
+  exit "$code"
+}
+trap 'on_signal 1' HUP
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+
+deny() { # reason
+  cat >&2 <<EOF
+snouty shim: denied: $display
+Reason: $1
+This GitHub Action runs snouty read-only. It does not launch runs, start
+debugging sessions, exec into runs, cancel or wait on runs, update snouty, log
+in, or serve MCP. Do not retry this command or look for a way around it. If a
+debugging session would settle a root cause, recommend one in the report
+instead (recommended_debug_session: run id, input hash, vtime, why that moment,
+what to inspect) so a person can run \`snouty debug\` themselves.
+Allowed: snouty runs list|show|properties|logs|search|events|build-logs,
+snouty doctor, snouty docs ..., snouty --version, snouty --help,
+snouty help <command>, snouty <command> --help.
+EOF
+  finish 126 true
+}
+
+strip_auth() {
+  # `?auth=TOKEN&rest` keeps `?rest`; a trailing or `&auth=TOKEN` is dropped.
+  LC_ALL=C sed -u -E \
+    -e 's/\?auth=[^]["'\''<>&#)`\\[:space:]]+&/?/g' \
+    -e 's/[?&]auth=[^]["'\''<>&#)`\\[:space:]]+//g'
+}
+
+# --- Parse the command path, skipping snouty's global flags. -----------------
+# Globals (clap `global = true`) may appear before or after any subcommand:
+# --json, --verbose (no value), --profile <name>, --settings <path>; plus
+# -h/--help and -V/--version. snouty has no subcommand aliases or prefix
+# inference, so the path is the first one or two bare words.
+
+# --settings can point snouty at a file with its own base_url, which would send
+# the API key to another host. The action configures snouty through the
+# environment, so the flag is never needed here.
+for a in "$@"; do
+  case $a in
+    --) break ;;
+    --settings|--settings=*) deny "--settings is not allowed (snouty is configured through the environment)" ;;
+  esac
+done
+
+path=()
+help=0
+version=0
+i=0
+path_complete() {
+  [ ${#path[@]} -ge 1 ] && { [ "${path[0]}" != runs ] || [ ${#path[@]} -ge 2 ]; }
+}
+while [ "$i" -lt $# ] && ! path_complete; do
+  a=${args[i]}
+  case $a in
+    --json|--verbose|--profile=?*) ;;
+    --profile)
+      i=$((i + 1))
+      [ "$i" -lt $# ] || deny "--profile needs a value"
+      ;;
+    -h|--help) help=1 ;;
+    -V|--version) version=1 ;;
+    --) deny "'--' before the subcommand" ;;
+    -*) deny "unrecognized option '$a' before the subcommand" ;;
+    *) path+=("$a") ;;
+  esac
+  i=$((i + 1))
+done
+rest=("${args[@]:i}")
+
+allowed=0
+if [ ${#path[@]} -eq 0 ]; then
+  # `snouty --help` / `snouty --version` with nothing else.
+  if [ $((help + version)) -gt 0 ] && [ ${#rest[@]} -eq 0 ]; then
+    allowed=1
+  else
+    deny "no subcommand given"
+  fi
+else
+  case "${path[*]}" in
+    doctor|docs|help|version|runs|"runs list"|"runs show"|"runs properties"|\
+"runs logs"|"runs search"|"runs events"|"runs build-logs"|"runs help")
+      allowed=1 ;;
+  esac
+fi
+
+if [ "$allowed" -eq 0 ]; then
+  # A denied command may still be asked for its help page, as long as nothing
+  # but help and global flags follow it: `snouty runs exec --help`.
+  only_help=1
+  j=0
+  while [ "$j" -lt ${#rest[@]} ]; do
+    case ${rest[j]} in
+      -h|--help) help=1 ;;
+      --json|--verbose|--profile=?*) ;;
+      --profile) j=$((j + 1)); [ "$j" -lt ${#rest[@]} ] || only_help=0 ;;
+      *) only_help=0; break ;;
+    esac
+    j=$((j + 1))
+  done
+  if [ "$only_help" -eq 1 ] && [ "$help" -eq 1 ]; then
+    allowed=1
+  else
+    deny "'snouty ${path[*]}' is not an allowed command"
+  fi
+fi
+
+# --- Run the real snouty. ------------------------------------------------------
+if [ -z "$real" ] || [ ! -x "$real" ]; then
+  echo "snouty shim: the real snouty binary was not found (looked in $self_dir/../libexec/snouty and \$ATT_SNOUTY_REAL)" >&2
+  finish 127 false
+fi
+
+# stdout and stderr each go through their own streaming filter. The real
+# snouty runs in the background so that `wait` (unlike a foreground command)
+# lets the signal traps above run at once. Its stdin is /dev/null.
+exec 3> >(strip_auth)
+out_filter=$!
+exec 4> >(exec 3>&-; strip_auth >&2)
+err_filter=$!
+"$real" "$@" >&3 2>&4 3>&- 4>&- &
+child=$!
+exec 3>&- 4>&-
+rc=0
+wait "$child" || rc=$?
+child=""
+wait "$out_filter" "$err_filter" 2>/dev/null || true
+finish "$rc" false

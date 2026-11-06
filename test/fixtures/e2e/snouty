@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Fake snouty release binary for test/test-e2e.sh. The test packs it into a
+# fake release tarball, so install.sh installs it as $ATT_HOME/libexec/snouty.
+#
+# Appends one JSON line per call to $FAKE_DIR/snouty-calls.jsonl (argv and the
+# settings it saw) and answers the calls the pipeline makes: --version, doctor
+# --json (a passing report), runs list (from $FAKE_DIR/runs.json) and runs logs.
+# Like the real API, its output carries signed ?auth= links; the shim must
+# strip them before the agent sees them.
+set -euo pipefail
+
+version=0.8.1
+
+if [ -n "${FAKE_DIR:-}" ]; then
+  if [ $# -gt 0 ]; then printf '%s\0' "$@"; fi |
+    jq -cRs --arg base "${ANTITHESIS_BASE_URL-}" --arg settings "${SNOUTY_SETTINGS_PATH-}" \
+      --arg key "${ANTITHESIS_API_KEY:+set}" \
+      '{argv: (if . == "" then [] else split("\u0000")[:-1] end),
+        base_url: $base, settings: $settings, api_key: $key}' >> "$FAKE_DIR/snouty-calls.jsonl"
+fi
+
+# Global flags may sit anywhere; drop --json to get the command words.
+words=()
+for a in "$@"; do [ "$a" = --json ] || words+=("$a"); done
+
+case "${words[*]-}" in
+  --version)
+    echo "snouty $version"
+    ;;
+  doctor)
+    api_key=ok
+    [ -n "${ANTITHESIS_API_KEY:-}" ] || api_key=error
+    jq -n --arg api_key "$api_key" --arg tenant "${ANTITHESIS_TENANT-}" --arg base "${ANTITHESIS_BASE_URL-}" '{
+      ok: ($api_key == "ok"),
+      checks: [
+        {name: "api_key", status: $api_key, message: "API key accepted"},
+        {name: "api_reachable", status: "ok", message: "reached \($base)"},
+        {name: "container_runtime", status: "ok", message: "docker 27.0"},
+        {name: "docker_compose", status: "ok", message: "compose v2.29"}
+      ],
+      settings: {tenant: $tenant, base_url: $base}
+    }'
+    [ "$api_key" = ok ]
+    ;;
+  "runs list -n 200")
+    cat "$FAKE_DIR/runs.json"
+    ;;
+  "runs logs "*)
+    run=${words[2]-} hash=${words[3]-} vtime=${words[4]-}
+    jq -cn --arg run "$run" --arg hash "$hash" --arg vtime "$vtime" '
+      {vtime: "67.70", input_hash: $hash, source: {container: "bank"}, output_text: "transfer from=acct-7 to=acct-3 amount=50"},
+      {vtime: "67.74", input_hash: $hash, source: {container: "bank"}, output_text: "transfer from=acct-7 to=acct-9 amount=60"},
+      {vtime: $vtime, input_hash: $hash, source: {container: "bank"}, output_text: "assertion failed: balance(acct-7) = -10 < 0"},
+      {vtime: $vtime, input_hash: $hash, source: {container: "workload"}, output_text: "details: https://acme.antithesis.com/report/\($run)/index.html?auth=SECRET-from-snouty"}'
+    ;;
+  *)
+    echo "fake snouty: unsupported command: $*" >&2
+    exit 2
+    ;;
+esac
