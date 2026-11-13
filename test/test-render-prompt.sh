@@ -35,7 +35,7 @@ prompt="$tmp/home/work/prompt.md"
 inputs="$tmp/home/work/inputs.json"
 
 [ ! -e "$tmp/pwned1" ] && [ ! -e "$tmp/pwned2" ]; ok $? "no command substitution was executed"
-[ "$(head -n 1 "$prompt")" = "/antithesis-skills:antithesis-triage" ]; ok $? "prompt starts with the skill invocation"
+[ "$(head -n 1 "$prompt")" = "/antithesis:antithesis triage" ]; ok $? "prompt starts with the skill invocation, naming the triage module"
 
 jq -e --arg r "$nasty_runs" --arg k "$nasty_known" --arg i "$nasty_instr" \
   '.runs == $r and ."known-issues" == $k and .instructions == $i and .since == "7d"
@@ -80,7 +80,7 @@ grep -qF 'not set in the environment; snouty resolves it' "$prompt"; ok $? "miss
 mkdir -p "$tmp/action/prompts" "$tmp/action/schema" "$tmp/action/scripts"
 cp "$root/schema/findings.schema.json" "$tmp/action/schema/"
 cp "$root/scripts/render-prompt.sh" "$root/scripts/env.sh" "$tmp/action/scripts/"
-printf '/antithesis-skills:antithesis-triage\n{{REPOSITORY}} {{NO_SUCH_THING}}\n' > "$tmp/action/prompts/triage.md"
+printf '/antithesis:antithesis triage\n{{REPOSITORY}} {{NO_SUCH_THING}}\n' > "$tmp/action/prompts/triage.md"
 if render "$tmp/action"; then rc=1; else grep -q 'NO_SUCH_THING' "$tmp/log"; rc=$?; fi
 ok "$rc" "unknown placeholder fails the render"
 

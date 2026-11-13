@@ -268,7 +268,7 @@ program='
             "- **Why this moment:** \(.reason | text)",
             "- **What to inspect:** \(.inspect | text)",
             "",
-            "Start the session yourself (it uses core hours until it ends; see the `antithesis-debug` skill):",
+            "Start the session yourself (it uses compute hours until it ends; see `/antithesis debug` in the Antithesis plugin, antithesishq/antithesis-plugin):",
             "",
             ( [ "snouty debug --run-id \(.run_id | shq) --input-hash \(.input_hash | shq) --vtime \(.vtime | shq) --title \($title | title_arg)",
                 "# snouty prints the session'\''s run id. When it is ready, run commands at that moment:",
@@ -331,7 +331,7 @@ program='
       ( [ ($versions.action_ref // empty | "action \(code)"),
           ($versions.snouty // empty | "snouty \(code)"),
           ($versions.claude_code // empty | "Claude Code \(code)"),
-          ($versions.skills_ref // empty | "triage skill \(tostring | if is_sha then .[0:12] else . end | code)"),
+          ($versions.plugin_ref // empty | "Antithesis plugin \(tostring | if is_sha then .[0:12] else . end | code)"),
           ($versions.model // empty | "model \(code)") ] as $v
         | if ($v | length) > 0 then "**Versions:** " + ($v | join(" · ")), "" else empty end ),
       ( $agent // empty
@@ -423,15 +423,15 @@ program='
           "The artifact'\''s `transcript/` folder has the raw Claude Code session log (`claude-session.jsonl`) and a normalized copy (`transcript.jsonl`: OpenAI-chat-shaped messages after a header line with versions and inputs; tool outputs over 16 KB are in `tool-results/`)."
           + (if $sid != "" then " Session id: \($sid | code)." else "" end),
           "",
-          "To continue the investigation locally, check out this repository, build the same single-skill plugin directory (`antithesis-triage` from antithesishq/antithesis-skills at "
-          + ($versions.skills_ref // "the same ref" | tostring | code)
-          + ", laid out as `plugin/.claude-plugin/plugin.json` and `plugin/skills/antithesis-triage/`), then run from the checkout with the same Claude Code version"
+          "To continue the investigation locally, check out this repository and, next to it, antithesishq/antithesis-plugin at "
+          + ($versions.plugin_ref // "the same ref" | tostring | code)
+          + " (the session loaded the `antithesis` skill from its `plugins/antithesis` directory), then run from the checkout with the same Claude Code version"
           + ($versions.claude_code // empty | " (\(code))") + ":",
           "",
-          ( [ "claude --resume \"$PWD/transcript/claude-session.jsonl\" --fork-session --plugin-dir ./plugin"
+          ( [ "claude --resume \"$PWD/transcript/claude-session.jsonl\" --fork-session --plugin-dir ../antithesis-plugin/plugins/antithesis"
               + ($versions.model // empty | " --model \(shq)") ] | join("\n") | fenced("sh") ),
           "",
-          "`--resume` takes a session id or the path to a session `.jsonl` file; `--fork-session` leaves the downloaded log unchanged. Adjust the paths to where you unpacked the artifact and built the plugin."
+          "`--resume` takes a session id or the path to a session `.jsonl` file; `--fork-session` leaves the downloaded log unchanged. Adjust the paths to where you unpacked the artifact and checked out the plugin."
         else
           "Transcripts were withheld from this artifact"
           + (if $treason != "" then ": \($treason | text)" else "." end)

@@ -23,7 +23,7 @@ printf '%s\n' "$@" > "$FAKE_DIR/args"
 cat > "$FAKE_DIR/stdin"
 env > "$FAKE_DIR/env"
 pwd > "$FAKE_DIR/cwd"
-init='{"type":"system","subtype":"init","claude_code_version":"9.9.9","model":"claude-test","tools":["Bash","Edit","Read"],"plugins":[{"name":"antithesis-skills","path":"/x"}]}'
+init='{"type":"system","subtype":"init","claude_code_version":"9.9.9","model":"claude-test","tools":["Bash","Edit","Read"],"plugins":[{"name":"'"${FAKE_PLUGIN_NAME:-antithesis}"'","path":"/x"}]}'
 case "$FAKE_CLAUDE_MODE" in
   success)
     echo "$init"
@@ -64,9 +64,9 @@ chmod +x "$tmp/bin/claude"
 run_agent() {
   local mode=$1; shift
   rm -rf "${tmp:?}/home" "$tmp/fake"/*
-  mkdir -p "$tmp/home/plugin/skills/antithesis-triage" "$tmp/home/work" "$tmp/ws"
-  printf '/antithesis-skills:antithesis-triage\nPROMPT-BODY "quoted" $(not run)\n' > "$tmp/home/work/prompt.md"
-  echo '{"action_ref":"v0","snouty":"0.8.0","claude_code":"2.1.312","skills_ref":"abc"}' > "$tmp/home/work/versions.json"
+  mkdir -p "$tmp/home/plugin/skills/antithesis" "$tmp/home/work" "$tmp/ws"
+  printf '/antithesis:antithesis triage\nPROMPT-BODY "quoted" $(not run)\n' > "$tmp/home/work/prompt.md"
+  echo '{"action_ref":"v0","snouty":"0.10.0","claude_code":"2.1.312","plugin_ref":"abc"}' > "$tmp/home/work/versions.json"
   rc=0
   env -i PATH="$tmp/bin:$PATH" HOME="$tmp" FAKE_DIR="$tmp/fake" FAKE_CLAUDE_MODE="$mode" \
     ATT_ACTION_PATH="$tmp/action" ATT_HOME="$tmp/home" ATT_OUT="$tmp/home/out" ATT_WORK="$tmp/home/work" GITHUB_WORKSPACE="$tmp/ws" \
@@ -117,7 +117,7 @@ done
 has ANTITHESIS_API_KEY=kept "$tmp/fake/env" "other env is passed through"
 [ "$(wc -l < "$work/stream.jsonl")" -eq 9 ]; ok $? "stream.jsonl captures every line"
 jq -e '.type == "result" and .subtype == "success"' "$work/agent-result.json" > /dev/null; ok $? "agent-result.json holds the result line"
-jq -e '.model == "claude-test" and .snouty == "0.8.0"' "$work/versions.json" > /dev/null; ok $? "versions.json gains model, keeps the rest"
+jq -e '.model == "claude-test" and .snouty == "0.10.0"' "$work/versions.json" > /dev/null; ok $? "versions.json gains model, keeps the rest"
 [ -d "$tmp/home/out/patches" ] && [ -d "$work/scratch" ]; ok $? "creates patches and scratch dirs"
 has "[agent] session started: Claude Code 9.9.9, model claude-test" "$tmp/out" "prints the session start"
 has "[agent] Bash: snouty runs list" "$tmp/out" "prints the snouty subcommand"
@@ -138,11 +138,14 @@ lacks JQ-FILTER-NOT-SHOWN "$tmp/out" "never prints non-snouty/git commands"
 lacks ASSISTANT-TEXT-NOT-SHOWN "$tmp/out" "never prints assistant text"
 lacks FINAL-TEXT "$tmp/out" "never prints the final result text"
 has '[agent] finished: success, 4 turns, $0.12, 1 permission denials' "$tmp/out" "prints a result summary"
+has "plugins antithesis" "$tmp/out" "prints the loaded plugin"
+lacks "did not load" "$tmp/out" "no warning when the antithesis plugin loads"
 
-run_agent max_turns
+run_agent max_turns FAKE_PLUGIN_NAME=antithesis-skills
 [ "$rc" -ne 0 ]; ok $? "max-turns cap exits non-zero (got $rc)"
 jq -e '.subtype == "error_max_turns"' "$work/agent-result.json" > /dev/null; ok $? "max-turns result is saved"
 has "::error::The agent stopped at the max-turns cap (7)." "$tmp/out" "explains the max-turns cap"
+has "::warning::The antithesis plugin did not load" "$tmp/out" "warns when the antithesis plugin is not among the loaded plugins"
 
 run_agent auth_error
 [ "$rc" -ne 0 ]; ok $? "is_error result exits non-zero"

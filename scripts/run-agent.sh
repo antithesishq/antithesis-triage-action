@@ -52,7 +52,7 @@ prompt="$ATT_WORK/prompt.md"
 stream="$ATT_WORK/stream.jsonl"
 result="$ATT_WORK/agent-result.json"
 [[ -s "$prompt" ]] || fail "missing $prompt (render-prompt.sh must run first)"
-[[ -d "$ATT_HOME/plugin" ]] || fail "triage skill plugin not found at $ATT_HOME/plugin"
+[[ -d "$ATT_HOME/plugin" ]] || fail "Antithesis plugin not found at $ATT_HOME/plugin"
 command -v claude >/dev/null || fail "claude is not on PATH"
 
 mkdir -p "$ATT_OUT/patches" "$ATT_HOME/worktrees" "$ATT_WORK/scratch"
@@ -156,7 +156,7 @@ progress='
   | if .type == "system" and .subtype == "init" then
       "[agent] session started: Claude Code \(.claude_code_version // "?"), model \(.model // "?"), tools \((.tools // []) | join(",")), plugins \([.plugins[]?.name] | join(","))",
       (if (.plugin_errors // [] | length) > 0 then "::warning::\(.plugin_errors | length) plugin load error(s); see the transcript" else empty end),
-      (if ([.plugins[]?.name] | index("antithesis-skills")) == null then "::warning::The antithesis-skills plugin did not load" else empty end)
+      (if ([.plugins[]?.name] | index("antithesis")) == null then "::warning::The antithesis plugin did not load" else empty end)
     elif .type == "system" and .subtype == "permission_denied" then
       "[agent]   denied: \(.tool_name // "?" | tostring | tool)"
     elif .type == "system" and .subtype == "api_retry" then

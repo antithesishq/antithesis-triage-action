@@ -9,7 +9,7 @@
 # strip them before the agent sees them.
 set -euo pipefail
 
-version=0.8.1
+version=0.10.1
 
 if [ -n "${FAKE_DIR:-}" ]; then
   if [ $# -gt 0 ]; then printf '%s\0' "$@"; fi |
@@ -28,19 +28,25 @@ case "${words[*]-}" in
     echo "snouty $version"
     ;;
   doctor)
-    api_key=ok
-    [ -n "${ANTITHESIS_API_KEY:-}" ] || api_key=error
-    jq -n --arg api_key "$api_key" --arg tenant "${ANTITHESIS_TENANT-}" --arg base "${ANTITHESIS_BASE_URL-}" '{
-      ok: ($api_key == "ok"),
+    # The shape snouty 0.10 prints: checks have an id, not a name, and there
+    # are no settings (those moved to `snouty settings show`).
+    creds=ok
+    [ -n "${ANTITHESIS_API_KEY:-}" ] || creds=error
+    tenant=ok
+    [ -n "${ANTITHESIS_TENANT:-}" ] || tenant=error
+    jq -n --arg creds "$creds" --arg tenant "$tenant" --arg base "${ANTITHESIS_BASE_URL-}" '{
+      ok: ($creds == "ok" and $tenant == "ok"),
       checks: [
-        {name: "api_key", status: $api_key, message: "API key accepted"},
-        {name: "api_reachable", status: "ok", message: "reached \($base)"},
-        {name: "container_runtime", status: "ok", message: "docker 27.0"},
-        {name: "docker_compose", status: "ok", message: "compose v2.29"}
-      ],
-      settings: {tenant: $tenant, base_url: $base}
+        {id: "container_runtime", status: "ok", message: "docker 27.0"},
+        {id: "docker_compose", status: "ok", message: "compose v2.29"},
+        {id: "tenant", status: $tenant, message: "tenant is set"},
+        {id: "repository", status: "warn", message: "repository is not set"},
+        {id: "credentials", kind: "api_key", status: $creds, message: "API key provided"},
+        {id: "api", status: "ok", message: "Antithesis API reachable",
+         notes: [{level: "note", text: "reached \($base)"}]}
+      ]
     }'
-    [ "$api_key" = ok ]
+    [ "$creds" = ok ] && [ "$tenant" = ok ]
     ;;
   "runs list -n 200")
     cat "$FAKE_DIR/runs.json"

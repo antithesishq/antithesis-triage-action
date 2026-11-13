@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests for scripts/preflight.sh with a fake `snouty doctor`.
+# Tests for scripts/preflight.sh with a fake `snouty doctor` (snouty 0.10's
+# --json report: checks have an id, status and message).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
@@ -46,10 +47,13 @@ check_not() { # pattern file description
 }
 
 : > "$tmp/snouty-settings.toml" # install.sh creates it
-ok_json='{"ok":true,"checks":[{"name":"api_key","status":"ok","message":"ok"}],"settings":{"tenant":"acme"}}'
+creds_ok='{"id":"credentials","kind":"api_key","status":"ok","message":"API key provided"}'
+api_ok='{"id":"api","status":"ok","message":"Antithesis API reachable"}'
+ok_json='{"ok":true,"checks":['"$creds_ok,$api_ok"']}'
 
 fake_doctor "$ok_json" 0
 run 0 "all checks pass"
+check "$(printf 'ok\tcredentials\tAPI key provided')" "$tmp/last-output" "prints each check by id"
 check "^ANTITHESIS_BASE_URL=https://acme.antithesis.com$" "$tmp/doctor-env" "doctor runs with the API host pinned"
 check "^SNOUTY_SETTINGS_PATH=$tmp/snouty-settings.toml$" "$tmp/doctor-env" "doctor runs with the empty settings file"
 check "^ARGS=doctor --json$" "$tmp/doctor-env" "calls the real snouty doctor --json"
@@ -59,17 +63,25 @@ else echo "ok - writes nothing to GITHUB_ENV"; fi
 run 0 "an explicit ANTITHESIS_BASE_URL is kept" ANTITHESIS_BASE_URL=https://proxy.example
 check "^ANTITHESIS_BASE_URL=https://proxy.example$" "$tmp/doctor-env" "doctor sees the explicit base URL"
 
-fake_doctor '{"ok":false,"checks":[{"name":"api_key","status":"ok","message":"ok"},{"name":"container_runtime","status":"error","message":"no docker"},{"name":"docker_compose","status":"error","message":"no compose"}],"settings":{}}' 1
-run 0 "container runtime failures are ignored"
-check "ignoring failed checks not needed for triage" "$tmp/last-output" "warns about ignored checks"
+fake_doctor '{"ok":false,"checks":[{"id":"container_runtime","status":"error","message":"no docker"},{"id":"docker_compose","status":"error","message":"no compose"},'"$creds_ok,$api_ok"',{"id":"repository","status":"warn","message":"repository is not set"}]}' 1
+run 0 "container runtime failures and warnings are ignored"
+check "ignoring failed checks not needed for triage: container_runtime, docker_compose" "$tmp/last-output" "warns about ignored checks"
 
-fake_doctor '{"ok":false,"checks":[{"name":"api_key","status":"error","message":"invalid key"}],"settings":{}}' 1
-run 1 "api_key failure blocks"
-check "invalid key" "$tmp/last-output" "names the failing check"
+fake_doctor '{"ok":false,"checks":[{"id":"credentials","kind":"api_key","status":"error","message":"the API key is empty","notes":[{"level":"note","text":"set ANTITHESIS_API_KEY"}]}]}' 1
+run 1 "credentials failure blocks"
+check "credentials: the API key is empty (set ANTITHESIS_API_KEY)" "$tmp/last-output" "names the failing check with its notes"
+check "The credentials check is 'error'" "$tmp/last-output" "points at the credentials check"
 
-fake_doctor '{"ok":false,"checks":[{"name":"api_key","status":"ok","message":"ok"},{"name":"api","status":"error","message":"Antithesis API unreachable"}],"settings":{}}' 1
+fake_doctor '{"ok":false,"checks":['"$creds_ok"',{"id":"api","status":"error","message":"Antithesis API rejected authentication"}]}' 1
 run 1 "other failing checks block"
-check "Antithesis API unreachable" "$tmp/last-output" "names the unreachable API"
+check "api: Antithesis API rejected authentication" "$tmp/last-output" "names the failing API check"
+
+# snouty before 0.10 named its checks (`name`, an `api_key` check) and printed
+# the settings; install.sh refuses those versions, and preflight does not
+# mistake such a report for a pass.
+fake_doctor '{"ok":true,"checks":[{"name":"api_key","status":"ok","message":"ok"}],"settings":{"tenant":"acme"}}' 0
+run 1 "a report without a credentials check blocks"
+check "The credentials check is 'absent'" "$tmp/last-output" "says the credentials check is missing"
 
 fake_doctor 'not json' 1
 run 1 "garbage doctor output blocks"

@@ -133,11 +133,22 @@ plugin=${plugin_dirs[0]:-}
 plugins='[]' plugin_errors='[]' skills='[]'
 if [ -n "$plugin" ] && name=$(jq -er '.name' "$plugin/.claude-plugin/plugin.json" 2>/dev/null); then
   plugins=$(jq -cn --arg n "$name" --arg p "$plugin" '[{name: $n, path: $p}]')
-  if [ -f "$plugin/skills/antithesis-triage/SKILL.md" ]; then
-    skills=$(jq -cn --arg n "$name" '["\($n):antithesis-triage"]')
-  fi
+  for f in "$plugin"/skills/*/SKILL.md; do
+    [ -f "$f" ] || continue
+    f=${f%/SKILL.md}
+    skills=$(jq -c --arg s "$name:${f##*/}" '. + [$s]' <<<"$skills")
+  done
 else
   plugin_errors=$(jq -cn --arg p "$plugin" '[{plugin: $p, error: "plugin.json not found"}]')
+fi
+# The prompt's first line invokes a skill as `/<plugin>:<skill> [module]`: the
+# plugin must provide that skill, and the skill that module.
+read -r invocation module _ < "$prompt" || true
+skill=${invocation#/}
+if [[ $invocation != /*:* ]] || ! jq -e --arg s "$skill" 'index($s) != null' <<<"$skills" >/dev/null; then
+  problem "the prompt's first line invokes '$invocation', which is not a loaded skill (skills: $skills)"
+elif [ -n "$module" ] && [ ! -f "$plugin/skills/${skill#*:}/references/$module/MODULE.md" ]; then
+  problem "the prompt names the '$module' module, which the $skill skill does not have"
 fi
 
 # --- session log and stream ---------------------------------------------------------

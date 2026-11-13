@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Install pinned snouty, Claude Code and the antithesis-triage skill under
-# $ATT_HOME. Paths and per-step environment come from scripts/env.sh; nothing
-# is written to GITHUB_ENV or GITHUB_PATH.
+# Install pinned snouty, Claude Code and the antithesis skill from the
+# Antithesis plugin under $ATT_HOME. Paths and per-step environment come from
+# scripts/env.sh; nothing is written to GITHUB_ENV or GITHUB_PATH.
 set -euo pipefail
 
 esc() { local s=$1; s=${s//'%'/'%25'}; s=${s//$'\r'/'%0D'}; s=${s//$'\n'/'%0A'}; printf '%s' "$s"; }
@@ -14,15 +14,15 @@ die() { echo "::error::$(esc "$*")"; exit 1; }
 # sha256 of the default versions' downloads, pinned here so a replaced release
 # asset fails the install. Other versions fall back to the published checksums.
 declare -A PINNED_SHA256=(
-  [snouty-0.8.0-x86_64-unknown-linux-musl]=234fae94dd20130a7e723461de191ccaa839623fc519d7ae9ffff4c42cf49aca
-  [snouty-0.8.0-aarch64-unknown-linux-musl]=404e9d005d085cafe688bf0e94b811d8c67d3c68ded5d399f31bc19e6684a2f0
+  [snouty-0.10.0-x86_64-unknown-linux-musl]=d9a2cfe404cbbd82a5658dffaed3fddffb80773498b4eaac7bedb0d22cf1b7bc
+  [snouty-0.10.0-aarch64-unknown-linux-musl]=733eca41e258c20eedd24c207ee2e59dd88456e0e549f703554ef425b9682af1
   [claude-2.1.312-linux-x64]=4f4178ce41d83e23341ebfbaecdbcf8ea6bf7baea0690025abe49eeec3a5d01d
   [claude-2.1.312-linux-arm64]=dc4af28917455e009d26704b82a438353a06149e825b6cdf782908b2d28661f5
   [claude-2.1.312-linux-x64-musl]=78adef63924b762580b039c9ff0dd2ae44eb06171d467db62fd9040442505f76
   [claude-2.1.312-linux-arm64-musl]=62555d1d87e4fff49298b70f306ef851fa167fc58b179958680f7c4d407a8c5c
 )
 
-for v in ATT_SNOUTY_VERSION ATT_CLAUDE_CODE_VERSION ATT_SKILLS_REF; do
+for v in ATT_SNOUTY_VERSION ATT_CLAUDE_CODE_VERSION ATT_PLUGIN_REF; do
   [ -n "${!v:-}" ] || die "$v is not set (action.yml passes it to this step)."
 done
 
@@ -69,11 +69,14 @@ not_pinned() { # what
 }
 
 # --- snouty ----------------------------------------------------------------------
+# The antithesis skill needs snouty 0.10.0 or later, and preflight.sh reads the
+# `snouty doctor --json` report in the shape 0.10.0 prints.
+snouty_min=0.10.0
 snouty_ver=${ATT_SNOUTY_VERSION#v}
 [[ $snouty_ver =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] ||
-  die "snouty-version '$ATT_SNOUTY_VERSION' is not a release version like 0.8.0."
-[ "$(printf '%s\n' 0.8.0 "$snouty_ver" | sort -V | sed -n 1p)" = 0.8.0 ] ||
-  die "snouty-version must be 0.8.0 or newer (got $snouty_ver)."
+  die "snouty-version '$ATT_SNOUTY_VERSION' is not a release version like $snouty_min."
+[ "$(printf '%s\n' "$snouty_min" "$snouty_ver" | sort -V | sed -n 1p)" = "$snouty_min" ] ||
+  die "snouty-version must be $snouty_min or newer (got $snouty_ver)."
 
 echo "::group::Install snouty $snouty_ver ($snouty_target)"
 asset="snouty-$snouty_target.tar.xz"
@@ -130,31 +133,42 @@ cc_reported=$("$ATT_HOME/bin/claude" --version) || die "The installed Claude Cod
 echo "$cc_reported (sha256 $want) -> $ATT_HOME/bin/claude"
 echo "::endgroup::"
 
-# --- antithesis-triage skill as a single-skill plugin ------------------------------
-ref=$ATT_SKILLS_REF
+# --- the antithesis skill from the Antithesis plugin ---------------------------------
+# Only the antithesis skill is installed, with a manifest that keeps the
+# plugin's name and version: not the plugin's MCP config or anything else.
+ref=$ATT_PLUGIN_REF
 [[ $ref =~ ^[0-9a-f]{40}$ ]] ||
-  die "skills-ref must be a full 40-character commit SHA of antithesishq/antithesis-skills (got '$ref')."
-echo "::group::Install the antithesis-triage skill (antithesishq/antithesis-skills@$ref)"
-fetch "https://codeload.github.com/antithesishq/antithesis-skills/tar.gz/$ref" "$dl/skills.tar.gz"
-tar -tzf "$dl/skills.tar.gz" > "$dl/skills.list" || die "The antithesis-skills download is not a tarball."
-top=$(sed -n '1{s#/.*##;p;}' "$dl/skills.list")
-[ "$top" = "antithesis-skills-$ref" ] ||
-  die "Unexpected top-level directory '$top' in the antithesis-skills tarball."
-awk -v t="$top/" 'index($0, t) != 1 { bad = 1 } END { exit bad }' "$dl/skills.list" ||
-  die "The antithesis-skills tarball has entries outside $top/."
-grep -qxF "$top/antithesis-triage/SKILL.md" "$dl/skills.list" ||
-  die "antithesishq/antithesis-skills@$ref has no antithesis-triage/SKILL.md."
-mkdir "$dl/skills"
-tar -xzf "$dl/skills.tar.gz" -C "$dl/skills" --no-same-owner "$top/antithesis-triage"
+  die "plugin-ref must be a full 40-character commit SHA of antithesishq/antithesis-plugin (got '$ref')."
+echo "::group::Install the antithesis skill (antithesishq/antithesis-plugin@$ref)"
+fetch "https://codeload.github.com/antithesishq/antithesis-plugin/tar.gz/$ref" "$dl/plugin.tar.gz"
+tar -tzf "$dl/plugin.tar.gz" > "$dl/plugin.list" || die "The antithesis-plugin download is not a tarball."
+top=$(sed -n '1{s#/.*##;p;}' "$dl/plugin.list")
+[ "$top" = "antithesis-plugin-$ref" ] ||
+  die "Unexpected top-level directory '$top' in the antithesis-plugin tarball."
+awk -v t="$top/" 'index($0, t) != 1 { bad = 1 } END { exit bad }' "$dl/plugin.list" ||
+  die "The antithesis-plugin tarball has entries outside $top/."
+src=$top/plugins/antithesis
+for f in .claude-plugin/plugin.json skills/antithesis/SKILL.md; do
+  grep -qxF "$src/$f" "$dl/plugin.list" ||
+    die "antithesishq/antithesis-plugin@$ref has no plugins/antithesis/$f."
+done
+mkdir "$dl/plugin"
+tar -xzf "$dl/plugin.tar.gz" -C "$dl/plugin" --no-same-owner \
+  "$src/.claude-plugin/plugin.json" "$src/skills/antithesis"
+# prompts/triage.md invokes the skill as /antithesis:antithesis.
+plugin_name=$(jq -r '.name // empty' "$dl/plugin/$src/.claude-plugin/plugin.json" 2>/dev/null) ||
+  die "plugins/antithesis/.claude-plugin/plugin.json at antithesishq/antithesis-plugin@$ref is not valid JSON."
+[ "$plugin_name" = antithesis ] ||
+  die "Expected the plugin at antithesishq/antithesis-plugin@$ref to be named 'antithesis' (got '$plugin_name')."
 rm -rf "$ATT_HOME/plugin"
 mkdir -p "$ATT_HOME/plugin/.claude-plugin" "$ATT_HOME/plugin/skills"
-mv "$dl/skills/$top/antithesis-triage" "$ATT_HOME/plugin/skills/antithesis-triage"
-jq -n --arg ref "$ref" '{
-  name: "antithesis-skills",
-  version: "0.1.0-triage-only",
-  description: ("Only the antithesis-triage skill, from antithesishq/antithesis-skills@" + $ref
+mv "$dl/plugin/$src/skills/antithesis" "$ATT_HOME/plugin/skills/antithesis"
+jq --arg ref "$ref" '{
+  name,
+  version: (.version // "0.0.0"),
+  description: ("The antithesis skill from antithesishq/antithesis-plugin@" + $ref
                 + ", packaged by antithesis-triage-action.")
-}' > "$ATT_HOME/plugin/.claude-plugin/plugin.json"
+}' "$dl/plugin/$src/.claude-plugin/plugin.json" > "$ATT_HOME/plugin/.claude-plugin/plugin.json"
 (cd "$ATT_HOME" && find plugin -type f | sort)
 echo "::endgroup::"
 
@@ -169,8 +183,8 @@ if [ -z "$action_ref" ]; then
   esac
 fi
 jq -n --arg action_ref "${action_ref:-unknown}" --arg snouty "$snouty_ver" \
-  --arg claude_code "$cc_ver" --arg skills_ref "$ref" \
-  '{action_ref: $action_ref, snouty: $snouty, claude_code: $claude_code, skills_ref: $skills_ref}' \
+  --arg claude_code "$cc_ver" --arg plugin_ref "$ref" \
+  '{action_ref: $action_ref, snouty: $snouty, claude_code: $claude_code, plugin_ref: $plugin_ref}' \
   > "$ATT_WORK/versions.json"
 
 session_id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || true)
@@ -179,4 +193,4 @@ session_id=${session_id,,}
   die "Could not generate a session UUID."
 printf '%s\n' "$session_id" > "$ATT_WORK/session-id"
 
-echo "Installed snouty $snouty_ver, Claude Code $cc_ver, antithesis-triage@$ref (action ${action_ref:-unknown}); session $session_id."
+echo "Installed snouty $snouty_ver, Claude Code $cc_ver, antithesis-plugin@$ref (action ${action_ref:-unknown}); session $session_id."
