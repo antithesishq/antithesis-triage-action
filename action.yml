@@ -80,13 +80,13 @@ inputs:
     required: false
     default: 2.1.312
   snouty-version:
-    description: snouty release to install (>= 0.8.0).
+    description: snouty release to install (>= 0.10.0, which the Antithesis plugin needs).
     required: false
-    default: 0.8.0
-  skills-ref:
-    description: antithesishq/antithesis-skills commit to load the triage skill from.
+    default: 0.10.0
+  plugin-ref:
+    description: antithesishq/antithesis-plugin commit (full SHA) to load the antithesis skill from. The default is v0.1.0.
     required: false
-    default: ca4b8fba0991dbaf4b1b57bea9a4b9605725025f
+    default: 353f90ec046db19030e26715dfa022f9e0bd91f8
 
 outputs:
   status:
@@ -112,14 +112,14 @@ runs:
         ATT_EVENT_NAME: ${{ github.event_name }}
       run: '"$ATT_ACTION_PATH/scripts/check-event.sh"'
 
-    - name: Install snouty, Claude Code and the triage skill
+    - name: Install snouty, Claude Code and the Antithesis plugin
       shell: bash
       env:
         ATT_ACTION_PATH: ${{ github.action_path }}
         ATT_ACTION_REF: ${{ github.action_ref }}
         ATT_CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
         ATT_SNOUTY_VERSION: ${{ inputs.snouty-version }}
-        ATT_SKILLS_REF: ${{ inputs.skills-ref }}
+        ATT_PLUGIN_REF: ${{ inputs.plugin-ref }}
       run: '"$ATT_ACTION_PATH/scripts/install.sh"'
 
     - name: Preflight

@@ -11,9 +11,9 @@ On each run the agent:
 
 - picks the Antithesis runs you described,
 - groups comparable runs and marks each failure **new** or **ongoing**,
-- investigates failures with the
-  [`antithesis-triage`](https://github.com/antithesishq/antithesis-skills)
-  skill and [`snouty`](https://github.com/antithesishq/snouty), cross-referencing
+- investigates failures with the triage module of the `antithesis` skill from
+  the [Antithesis plugin](https://github.com/antithesishq/antithesis-plugin)
+  and [`snouty`](https://github.com/antithesishq/snouty), cross-referencing
   your source code,
 - suggests fixes (as text and `.patch` files) and recommends debugging
   sessions you can start yourself.
@@ -54,6 +54,7 @@ lines) passed to the agent, which applies them with `snouty`.
 | `instructions` | | Extra guidance for the agent. |
 | `model` | `claude-opus-5-5` | Claude model. |
 | `max-turns` / `max-budget-usd` / `timeout-minutes` | `200` / `10` / `60` | Hard caps on the agent session. |
+| `plugin-ref` / `snouty-version` / `claude-code-version` | Antithesis plugin v0.1.0 / `0.10.0` / `2.1.312` | Pinned tool versions. `plugin-ref` is a full commit SHA of [antithesis-plugin](https://github.com/antithesishq/antithesis-plugin); the plugin needs snouty 0.10.0 or later. |
 | `upload-transcript` | `auto` | `auto`: only on private repositories. |
 | `retention-days` | `14` | Artifact retention. |
 | `artifact-name` | `antithesis-triage-<job>-<attempt>` | Set a unique name per matrix job or per invocation if the action runs more than once in a workflow run. |

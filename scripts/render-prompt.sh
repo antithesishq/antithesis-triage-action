@@ -62,7 +62,7 @@ render='
   def tenant:
     if test("^[A-Za-z0-9._-]+$") then "`\(.)` (from `ANTITHESIS_TENANT`)"
     elif test("\\S") then "\(tojson) (from `ANTITHESIS_TENANT`)"
-    else "not set in the environment; snouty resolves it from its own configuration (see `settings` in `snouty doctor --json`)" end;
+    else "not set in the environment; snouty resolves it from its own configuration" end;
   $inputs[0] as $in
   | {
       REPOSITORY: $repository, SHA: $sha, REF_NAME: $ref_name,

@@ -18,7 +18,7 @@
 # for that step only, serving fake release downloads built here: snouty
 # (fixtures/e2e/snouty, a fake API), Claude Code (fixtures/e2e/claude, a fake
 # CLI that takes its paths from the prompt and runs real tool calls through
-# the shim) and a skills tarball. The versions are not the pinned defaults, so
+# the shim) and an antithesis-plugin tarball. The versions are not the pinned defaults, so
 # install.sh takes their checksums from the fake server. No network.
 #
 # Scenarios:
@@ -112,7 +112,7 @@ input_default() { # input name -> its default in action.yml, unquoted
 
 snouty_version=$("$fx/snouty" --version) && snouty_version=${snouty_version##* }
 cc_version=$("$fx/claude" --version) && cc_version=${cc_version%% *}
-skills_ref=$(input_default skills-ref)
+plugin_ref=$(input_default plugin-ref)
 model=$(input_default model)
 artifact_name=$(input_default artifact-name)
 artifact_name=${artifact_name//'${{ github.job }}'/triage}
@@ -121,7 +121,7 @@ artifact_name=${artifact_name//'${{ github.run_attempt }}'/1}
 # --- fake release downloads -----------------------------------------------------
 srv=$tmp/downloads
 build_downloads() {
-  local pkg=$tmp/pkg t p d sum top=antithesis-skills-$skills_ref
+  local pkg=$tmp/pkg t p d sum top=antithesis-plugin-$plugin_ref
   d=$srv/github.com/antithesishq/snouty/releases/download/v$snouty_version
   mkdir -p "$d"
   for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
@@ -139,13 +139,20 @@ build_downloads() {
   jq -n --arg v "$cc_version" --arg s "$sum" '{version: $v, platforms: (
     [("linux-x64", "linux-arm64", "linux-x64-musl", "linux-arm64-musl") | {key: ., value: {checksum: $s}}]
     | from_entries)}' > "$d/manifest.json"
-  mkdir -p "$pkg/$top/antithesis-triage/references" "$pkg/$top/antithesis-launch"
-  printf -- '---\nname: antithesis-triage\ndescription: e2e stub\n---\n# Antithesis triage (stub)\n' \
-    > "$pkg/$top/antithesis-triage/SKILL.md"
-  echo stub > "$pkg/$top/antithesis-triage/references/logs.md"
-  echo 'must not be installed' > "$pkg/$top/antithesis-launch/SKILL.md"
-  mkdir -p "$srv/codeload.github.com/antithesishq/antithesis-skills/tar.gz" "$tmp/curlbin"
-  tar -czf "$srv/codeload.github.com/antithesishq/antithesis-skills/tar.gz/$skills_ref" -C "$pkg" "$top"
+  # Laid out like antithesishq/antithesis-plugin: only the manifest's name and
+  # version and skills/antithesis may end up installed.
+  p=$pkg/$top/plugins/antithesis
+  mkdir -p "$p/.claude-plugin" "$p/skills/antithesis/references/triage" "$p/skills/other"
+  jq -n '{name: "antithesis", version: "0.1.0", description: "e2e stub", hooks: "must not be installed"}' \
+    > "$p/.claude-plugin/plugin.json"
+  printf -- '---\nname: antithesis\ndescription: e2e stub\n---\n# Antithesis (stub)\n' \
+    > "$p/skills/antithesis/SKILL.md"
+  echo stub > "$p/skills/antithesis/references/triage/MODULE.md"
+  echo 'must not be installed' > "$p/skills/other/SKILL.md"
+  echo '{"mcpServers": "must not be installed"}' > "$p/mcp.json"
+  echo 'must not be installed' > "$pkg/$top/README.md"
+  mkdir -p "$srv/codeload.github.com/antithesishq/antithesis-plugin/tar.gz" "$tmp/curlbin"
+  tar -czf "$srv/codeload.github.com/antithesishq/antithesis-plugin/tar.gz/$plugin_ref" -C "$pkg" "$top"
   install -m 0755 "$fx/curl" "$tmp/curlbin/curl"
 }
 build_downloads
@@ -187,7 +194,7 @@ step_env() {
     check-event.sh) senv+=(ATT_EVENT_NAME=schedule) ;;
     install.sh)
       senv+=(ATT_ACTION_REF='' ATT_CLAUDE_CODE_VERSION="$cc_version" ATT_SNOUTY_VERSION="$snouty_version"
-        ATT_SKILLS_REF="$skills_ref" PATH="$tmp/curlbin:$PATH" FAKE_DOWNLOADS="$srv") ;;
+        ATT_PLUGIN_REF="$plugin_ref" PATH="$tmp/curlbin:$PATH" FAKE_DOWNLOADS="$srv") ;;
     preflight.sh) ;;
     render-prompt.sh)
       for n in runs since limit run-ids run-params grouping known-issues ignore instructions; do
@@ -331,15 +338,18 @@ for s in check-event install preflight render-prompt run-agent finalize; do expe
 
 # install.sh: downloads, layout, versions.
 check "$name: install fetched only the five release downloads" \
-  test "$(grep -cvE '^https://(github\.com/antithesishq/snouty/releases/download/|downloads\.claude\.ai/claude-code-releases/|codeload\.github\.com/antithesishq/antithesis-skills/tar\.gz/)' "$fake/curl.log")-$(wc -l < "$fake/curl.log")" = 0-5
+  test "$(grep -cvE '^https://(github\.com/antithesishq/snouty/releases/download/|downloads\.claude\.ai/claude-code-releases/|codeload\.github\.com/antithesishq/antithesis-plugin/tar\.gz/)' "$fake/curl.log")-$(wc -l < "$fake/curl.log")" = 0-5
 check "$name: bin/snouty is the shim" cmp -s "$att/bin/snouty" "$root/shim/snouty"
 check "$name: libexec/snouty is the downloaded snouty" cmp -s "$att/libexec/snouty" "$fx/snouty"
 check "$name: bin/claude is the downloaded Claude Code" cmp -s "$att/bin/claude" "$fx/claude"
-check "$name: the plugin holds only the antithesis-triage skill" \
-  test "$(cd "$att/plugin" && find . -type f | sort | tr '\n' ' ')" = "./.claude-plugin/plugin.json ./skills/antithesis-triage/SKILL.md ./skills/antithesis-triage/references/logs.md "
+check "$name: the plugin holds only the antithesis skill" \
+  test "$(cd "$att/plugin" && find . -type f | sort | tr '\n' ' ')" = "./.claude-plugin/plugin.json ./skills/antithesis/SKILL.md ./skills/antithesis/references/triage/MODULE.md "
+check "$name: the plugin manifest keeps only the upstream name and version" \
+  jq -e --arg r "$plugin_ref" '(keys == ["description", "name", "version"]) and .name == "antithesis" and .version == "0.1.0"
+    and (.description | contains($r))' "$att/plugin/.claude-plugin/plugin.json"
 check "$name: versions.json records the action ref from the _actions path, the versions and the model" \
-  jq -e --arg s "$snouty_version" --arg c "$cc_version" --arg r "$skills_ref" --arg m "$model" \
-  '.action_ref == "v0" and .snouty == $s and .claude_code == $c and .skills_ref == $r and .model == $m' "$awork/versions.json"
+  jq -e --arg s "$snouty_version" --arg c "$cc_version" --arg r "$plugin_ref" --arg m "$model" \
+  '.action_ref == "v0" and .snouty == $s and .claude_code == $c and .plugin_ref == $r and .model == $m' "$awork/versions.json"
 
 # preflight.sh: the real snouty directly, with the API host pinned.
 check "$name: preflight ran snouty doctor --json with the pinned host and the empty settings file" \
@@ -362,7 +372,7 @@ check "$name: inputs.json holds the action.yml defaults" \
 # run-agent.sh, from the agent's side.
 check "$name: claude got prompt.md on stdin, unchanged" cmp -s "$fake/claude-stdin" "$awork/prompt.md"
 no_problems
-has "$logs/run-agent.log" "[agent] session started: Claude Code $cc_version, model $model, tools Bash,Read,Edit, plugins antithesis-skills" \
+has "$logs/run-agent.log" "[agent] session started: Claude Code $cc_version, model $model, tools Bash,Read,Edit, plugins antithesis" \
   "$name: the log shows the session start with the plugin loaded"
 lacks "$logs/run-agent.log" "::warning::" "$name: run-agent prints no warnings"
 has "$logs/run-agent.log" "[agent] Bash: snouty launch" "$name: the log shows the launch attempt"
@@ -441,7 +451,7 @@ check "$name: transcript header has the session, model, versions and result" \
   jq -se --arg sid "$sid" --arg m "$model" --arg c "$cc_version" '.[0] | .type == "header" and .session_id == $sid
     and .model == $m and .claude_code_version == $c and .versions.action_ref == "v0" and .result.subtype == "success"' "$tr_file"
 check "$name: transcript has the prompt, tool calls and tool results" \
-  jq -se '(.[1].role == "system") and (.[2].role == "user") and (.[2].content | startswith("/antithesis-skills:antithesis-triage"))
+  jq -se '(.[1].role == "system") and (.[2].role == "user") and (.[2].content | startswith("/antithesis:antithesis triage\n"))
     and ([.[] | select(.role == "assistant") | .tool_calls[]?] | length) == ([.[] | select(.role == "tool")] | length)
     and ([.[] | select(.role == "tool")] | length) >= 10' "$tr_file"
 check "$name: transcript keeps the shim's refusal as an error result" \

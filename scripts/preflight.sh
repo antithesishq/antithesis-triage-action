@@ -39,7 +39,9 @@ command -v jq >/dev/null 2>&1 || die "jq is required but was not found on PATH."
 [ -f "$SNOUTY_SETTINGS_PATH" ] ||
   die "snouty's settings file $SNOUTY_SETTINGS_PATH is missing. Did the install step fail?"
 
-# doctor exits 1 when a check fails but still prints its JSON report.
+# doctor exits 1 when a check fails but still prints its JSON report:
+# {"ok": bool, "checks": [{"id", "status": "ok"|"warn"|"error", "message", "notes"?}]}
+# (snouty 0.10.0 and later, which install.sh requires).
 err=$(mktemp)
 trap 'rm -f "$err"' EXIT
 rc=0
@@ -52,32 +54,31 @@ if ! jq -e 'type == "object" and (.ok | type == "boolean") and (.checks | type =
   echo "::endgroup::"
   die "snouty doctor --json did not print a report (exit $rc): $(head -c 500 "$err")"
 fi
-jq -r '.checks[] | "\(.status)\t\(.name)\t\(.message)"' <<<"$report"
-jq -r '"tenant: \(.settings.tenant // "not set")"' <<<"$report"
+jq -r '.checks[] | "\(.status)\t\(.id)\t\(.message)"' <<<"$report"
 [ -s "$err" ] && cat "$err" >&2
 echo "::endgroup::"
 
 # Triage only talks to the API, so container runtime / Compose failures (which
 # snouty launch needs) are downgraded to warnings.
 not_needed='["container_runtime", "docker_compose"]'
-api_key=$(jq -r 'first(.checks[] | select(.name == "api_key") | .status) // "absent"' <<<"$report")
+credentials=$(jq -r 'first(.checks[] | select(.id == "credentials") | .status) // "absent"' <<<"$report")
 blocking=$(jq -r --argjson skip "$not_needed" \
-  '[.checks[] | select(.status == "error" and (.name as $n | $skip | index($n) | not))] | length' <<<"$report")
-if [ "$api_key" = ok ] && [ "$blocking" = 0 ]; then
+  '[.checks[] | select(.status == "error" and (.id as $n | $skip | index($n) | not))] | length' <<<"$report")
+if [ "$credentials" = ok ] && [ "$blocking" = 0 ]; then
   skipped=$(jq -r --argjson skip "$not_needed" \
-    '[.checks[] | select(.status == "error" and (.name as $n | $skip | index($n))) | .name] | join(", ")' <<<"$report")
+    '[.checks[] | select(.status == "error" and (.id as $n | $skip | index($n))) | .id] | join(", ")' <<<"$report")
   [ -n "$skipped" ] && echo "::warning::snouty doctor: ignoring failed checks not needed for triage: $skipped"
   echo "snouty doctor: checks needed for triage passed."
   exit 0
 fi
 
 failing=$(jq -r '[.checks[] | select(.status == "error")
-  | "\(.name): \(.message)" + ([.notes[]?.text] | if length > 0 then " (" + join("; ") + ")" else "" end)]
+  | "\(.id): \(.message)" + ([.notes[]?.text] | if length > 0 then " (" + join("; ") + ")" else "" end)]
   | join(" | ")' <<<"$report")
 
 msg="snouty doctor failed, so the triage agent was not started."
 [ -n "$failing" ] && msg+=" Failing checks: $failing."
-if [ "$api_key" != ok ]; then
-  msg+=" The api_key check is '$api_key': set ANTITHESIS_API_KEY to a valid Antithesis API key."
+if [ "$credentials" != ok ]; then
+  msg+=" The credentials check is '$credentials': set ANTITHESIS_API_KEY to a valid Antithesis API key."
 fi
 die "$msg"

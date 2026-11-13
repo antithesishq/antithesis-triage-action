@@ -33,7 +33,7 @@ setup() {
   echo 'diff --git a/src/ledger.rs b/src/ledger.rs' >"$out/patches/balance-nonnegative.patch"
   cp "$fx/stream.jsonl" "$fx/inputs.json" "$fx/session-id" "$work/"
   jq '.model = "claude-opus-5-5"' "$fx/versions.json" >"$work/versions.json"
-  printf 'Run /antithesis-skills:antithesis-triage\nAPI key for the record: %s\n' "$secret" >"$work/prompt.md"
+  printf 'Run /antithesis:antithesis triage\nAPI key for the record: %s\n' "$secret" >"$work/prompt.md"
   grep '"type":"result"' "$fx/stream.jsonl" >"$work/agent-result.json"
   printf '{"type":"user","message":{"role":"user","content":"key %s"}}\n' "$secret" \
     >"$cfg/projects/-home-runner-work-bank-bank/$sid.jsonl"
@@ -82,9 +82,9 @@ check "success: raw session log copied" test -s "$out/transcript/claude-session.
 check "success: session sidecar copied" test -f "$out/transcript/claude-session/tool-results/x.txt"
 check "success: normalized transcript" test "$(head -n 1 "$out/transcript/transcript.jsonl" | jq -r .type)" = header
 check "success: header has inputs and versions" \
-  jq -e 'select(.type == "header") | .inputs.since == "7d" and .versions.snouty == "0.8.0" and .session_id != null' "$out/transcript/transcript.jsonl"
+  jq -e 'select(.type == "header") | .inputs.since == "7d" and .versions.snouty == "0.10.0" and .session_id != null' "$out/transcript/transcript.jsonl"
 check "success: prompt is the first user message" \
-  jq -se '[.[] | select(.role == "user")][0].content | startswith("Run /antithesis-skills:antithesis-triage")' "$out/transcript/transcript.jsonl"
+  jq -se '[.[] | select(.role == "user")][0].content | startswith("Run /antithesis:antithesis triage")' "$out/transcript/transcript.jsonl"
 check "success: large tool result spilled" test -s "$out/transcript/tool-results/toolu_02B.txt"
 check "success: spilled pointer" grep -q 'full text in tool-results/toolu_02B.txt' "$out/transcript/transcript.jsonl"
 check "success: staging cleaned up" test ! -e "$work/transcript" -a ! -e "$work/transcript-src"
